@@ -1,12 +1,8 @@
 package template
 
 import (
-	"context"
-	"errors"
 	"strings"
 	"testing"
-
-	"github.com/eric642/e2b-go-sdk"
 )
 
 func TestNewDefaultsToE2BBase(t *testing.T) {
@@ -122,13 +118,3 @@ func TestToDockerfileWithoutBaseImage(t *testing.T) {
 	}
 }
 
-func TestBuildNotImplemented(t *testing.T) {
-	b := New().FromImage("alpine:3")
-	_, err := b.Build(context.Background(), BuildOptions{})
-	if err == nil {
-		t.Fatal("Build should return an error for now")
-	}
-	if !errors.Is(err, e2b.ErrNotImplemented) {
-		t.Fatalf("want ErrNotImplemented, got %v", err)
-	}
-}

@@ -10,7 +10,6 @@
 package template
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
@@ -371,24 +370,3 @@ func (b *Builder) serialize(force bool) (*apiclient.TemplateBuildStartV2, error)
 	return body, nil
 }
 
-// BuildOptions configures a server-side build.
-type BuildOptions struct {
-	Config     e2b.Config
-	CPUCount   int32
-	MemoryMB   int32
-	SkipCache  bool
-	OnLogEntry func(LogEntry)
-}
-
-// BuildInfo holds the result of a successful build.
-type BuildInfo struct {
-	TemplateID string
-	BuildID    string
-	Aliases    []string
-}
-
-// Build submits the template for remote build and waits for completion.
-// Not yet implemented; returns e2b.ErrNotImplemented.
-func (b *Builder) Build(ctx context.Context, opts BuildOptions) (*BuildInfo, error) {
-	return nil, e2b.ErrNotImplemented
-}
