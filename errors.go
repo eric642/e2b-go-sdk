@@ -210,3 +210,9 @@ func (e *CommandExitError) Error() string {
 
 // ErrNotImplemented is returned by stubbed features pending future work.
 var ErrNotImplemented = errors.New("e2b: not implemented")
+
+var (
+	ErrTemplateBuild  = errors.New("template build failed")
+	ErrTemplateUpload = errors.New("template file upload failed")
+	ErrTemplate       = errors.New("template error")
+)
