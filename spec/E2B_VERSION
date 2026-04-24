@@ -1,0 +1,5 @@
+# Upstream E2B spec source of truth. Managed by scripts/sync-spec.sh.
+# Do not edit by hand.
+tag=a6a1156a76753d5e9bbdd9eb7b26e84aa18b24d2
+semver=0.0.0-dev+a6a1156a7675
+commit=a6a1156a76753d5e9bbdd9eb7b26e84aa18b24d2

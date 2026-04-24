@@ -1,0 +1,9 @@
+package: volumeapi
+generate:
+  client: true
+  models: true
+  embedded-spec: false
+  strict-server: false
+output: internal/volumeapi/client.gen.go
+output-options:
+  skip-prune: true

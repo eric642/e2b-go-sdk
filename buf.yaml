@@ -1,0 +1,13 @@
+version: v2
+modules:
+  - path: spec/envd
+lint:
+  use:
+    - STANDARD
+  except:
+    - PACKAGE_VERSION_SUFFIX
+    - PACKAGE_DIRECTORY_MATCH
+    - DIRECTORY_SAME_PACKAGE
+breaking:
+  use:
+    - FILE

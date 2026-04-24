@@ -1,0 +1,9 @@
+package: envdapi
+generate:
+  client: true
+  models: true
+  embedded-spec: false
+  strict-server: false
+output: internal/envdapi/client.gen.go
+output-options:
+  skip-prune: true
