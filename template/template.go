@@ -11,6 +11,8 @@ package template
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	e2b "github.com/eric642/e2b-go-sdk"
@@ -148,11 +150,125 @@ func (b *Builder) Run(cmd string) *Builder {
 	return b
 }
 
+// CopyItem mirrors the Python SDK's CopyItem dict. All fields except Src and
+// Dest are optional.
+type CopyItem struct {
+	Src             string
+	Dest            string
+	User            string
+	Mode            os.FileMode
+	ForceUpload     bool
+	ResolveSymlinks *bool
+}
+
+// CopyOption is a functional option for Copy.
+type CopyOption func(*copyOpts)
+
+type copyOpts struct {
+	user            string
+	mode            os.FileMode
+	hasMode         bool
+	forceUpload     bool
+	hasForceUpload  bool
+	resolveSymlinks *bool
+}
+
+// WithCopyUser sets the owning user for the copied files (USER arg of COPY).
+func WithCopyUser(u string) CopyOption {
+	return func(o *copyOpts) { o.user = u }
+}
+
+// WithCopyMode sets the file mode applied to the copied files.
+func WithCopyMode(m os.FileMode) CopyOption {
+	return func(o *copyOpts) {
+		o.mode = m
+		o.hasMode = true
+	}
+}
+
+// WithCopyForceUpload forces re-upload of the COPY layer even when a matching
+// hash already exists on the server.
+func WithCopyForceUpload() CopyOption {
+	return func(o *copyOpts) {
+		o.forceUpload = true
+		o.hasForceUpload = true
+	}
+}
+
+// WithCopyResolveSymlinks overrides the default symlink resolution behavior
+// for this COPY. Pass true to follow symlinks, false to preserve them.
+func WithCopyResolveSymlinks(b bool) CopyOption {
+	return func(o *copyOpts) {
+		v := b
+		o.resolveSymlinks = &v
+	}
+}
+
+// validateRelativePath rejects absolute paths and paths that escape the
+// build context directory.
+func validateRelativePath(src string) error {
+	if filepath.IsAbs(src) {
+		return &e2b.InvalidArgumentError{Message: fmt.Sprintf("copy src %q must be a relative path", src)}
+	}
+	normalized := filepath.ToSlash(filepath.Clean(src))
+	if normalized == ".." || strings.HasPrefix(normalized, "../") {
+		return &e2b.InvalidArgumentError{Message: fmt.Sprintf("copy src %q escapes the context directory", src)}
+	}
+	return nil
+}
+
 // Copy adds a COPY instruction from the template build context. The Args
-// slice carries four positional slots — src, dst, user, mode — with user and
-// mode left empty here; later tasks extend the options surface.
-func (b *Builder) Copy(src, dst string) *Builder {
-	b.instructions = append(b.instructions, instruction{Type: instTypeCopy, Args: []string{src, dst, "", ""}, Force: b.consumeForce()})
+// slice carries four positional slots — src, dst, user, mode. When mode is
+// unset the slot stays "", otherwise it is formatted as a zero-padded 4-digit
+// octal string.
+func (b *Builder) Copy(src, dst string, opts ...CopyOption) *Builder {
+	if err := validateRelativePath(src); err != nil {
+		if b.err == nil {
+			b.err = err
+		}
+		return b
+	}
+
+	o := copyOpts{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	modeStr := ""
+	if o.hasMode {
+		modeStr = fmt.Sprintf("%04o", o.mode)
+	}
+
+	b.instructions = append(b.instructions, instruction{
+		Type:            instTypeCopy,
+		Args:            []string{src, dst, o.user, modeStr},
+		Force:           b.consumeForce(),
+		ForceUpload:     o.forceUpload,
+		HasForceUpload:  o.hasForceUpload,
+		ResolveSymlinks: o.resolveSymlinks,
+	})
+	return b
+}
+
+// CopyItems adds a COPY instruction for each item, translating struct fields
+// to CopyOptions so validation and defaults match single Copy calls.
+func (b *Builder) CopyItems(items []CopyItem) *Builder {
+	for _, it := range items {
+		opts := make([]CopyOption, 0, 4)
+		if it.User != "" {
+			opts = append(opts, WithCopyUser(it.User))
+		}
+		if it.Mode != 0 {
+			opts = append(opts, WithCopyMode(it.Mode))
+		}
+		if it.ForceUpload {
+			opts = append(opts, WithCopyForceUpload())
+		}
+		if it.ResolveSymlinks != nil {
+			opts = append(opts, WithCopyResolveSymlinks(*it.ResolveSymlinks))
+		}
+		b.Copy(it.Src, it.Dest, opts...)
+	}
 	return b
 }
 
