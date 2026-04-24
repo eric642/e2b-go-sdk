@@ -14,8 +14,43 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/eric642/e2b-go-sdk"
+	e2b "github.com/eric642/e2b-go-sdk"
+	apiclient "github.com/eric642/e2b-go-sdk/internal/api"
 )
+
+// instType enumerates the kinds of instructions the Builder can record. It
+// maps 1:1 to the server-side TemplateStep.Type string (except for instTypeRaw
+// which is internal to ToDockerfile rendering).
+type instType string
+
+const (
+	instTypeRun     instType = "RUN"
+	instTypeCopy    instType = "COPY"
+	instTypeWorkdir instType = "WORKDIR"
+	instTypeEnv     instType = "ENV"
+	instTypeUser    instType = "USER"
+	instTypeExpose  instType = "EXPOSE"
+	// instTypeRaw is an internal-only marker for raw Dockerfile text captured
+	// via FromDockerfile; it has no server-side TemplateStep representation
+	// and is skipped during serialize().
+	instTypeRaw instType = "__raw"
+)
+
+// defaultResolveSymlinks is the default for per-COPY symlink resolution when
+// callers don't opt in. Kept as a package-level constant for parity with the
+// Python SDK.
+const defaultResolveSymlinks = false
+
+// instruction is a structured record of a single builder step.
+type instruction struct {
+	Type            instType
+	Args            []string
+	Force           bool
+	ForceUpload     bool
+	HasForceUpload  bool // whether ForceUpload was explicitly set
+	ResolveSymlinks *bool
+	FilesHash       string
+}
 
 // Builder constructs a template.
 type Builder struct {
@@ -27,12 +62,14 @@ type Builder struct {
 	envs         map[string]string
 	workdir      string
 	tag          string
-}
 
-// instruction is an internal representation of one Dockerfile line.
-type instruction struct {
-	op   string
-	args []string
+	// Build-context and server-side build state.
+	contextDir     string
+	ignorePatterns []string
+	forceNextLayer bool
+	force          bool
+	err            error
+	registryConfig *apiclient.FromImageRegistry
 }
 
 // New returns an empty builder. Use FromImage / FromDockerfile to specify a
@@ -87,19 +124,36 @@ func (b *Builder) FromTemplate(templateID string) *Builder {
 
 // FromDockerfile replaces the builder with a raw Dockerfile.
 func (b *Builder) FromDockerfile(contents string) *Builder {
-	b.instructions = append(b.instructions, instruction{op: "__raw", args: []string{contents}})
+	b.instructions = append(b.instructions, instruction{Type: instTypeRaw, Args: []string{contents}})
+	return b
+}
+
+// WithContext sets the local directory used as the build context for COPY
+// instructions. Subsequent COPY hashing and tar packaging reads files under
+// this path.
+func (b *Builder) WithContext(dir string) *Builder {
+	b.contextDir = dir
+	return b
+}
+
+// WithIgnore appends patterns (in .dockerignore syntax) that filter files
+// during COPY hashing and tar packaging.
+func (b *Builder) WithIgnore(patterns ...string) *Builder {
+	b.ignorePatterns = append(b.ignorePatterns, patterns...)
 	return b
 }
 
 // Run adds a RUN instruction.
 func (b *Builder) Run(cmd string) *Builder {
-	b.instructions = append(b.instructions, instruction{op: "RUN", args: []string{cmd}})
+	b.instructions = append(b.instructions, instruction{Type: instTypeRun, Args: []string{cmd}})
 	return b
 }
 
-// Copy adds a COPY instruction from the template build context.
+// Copy adds a COPY instruction from the template build context. The Args
+// slice carries four positional slots — src, dst, user, mode — with user and
+// mode left empty here; later tasks extend the options surface.
 func (b *Builder) Copy(src, dst string) *Builder {
-	b.instructions = append(b.instructions, instruction{op: "COPY", args: []string{src, dst}})
+	b.instructions = append(b.instructions, instruction{Type: instTypeCopy, Args: []string{src, dst, "", ""}})
 	return b
 }
 
@@ -107,7 +161,7 @@ func (b *Builder) Copy(src, dst string) *Builder {
 // persists the value for later fluent calls.
 func (b *Builder) Workdir(path string) *Builder {
 	b.workdir = path
-	b.instructions = append(b.instructions, instruction{op: "WORKDIR", args: []string{path}})
+	b.instructions = append(b.instructions, instruction{Type: instTypeWorkdir, Args: []string{path}})
 	return b
 }
 
@@ -117,19 +171,21 @@ func (b *Builder) Env(key, value string) *Builder {
 		b.envs = map[string]string{}
 	}
 	b.envs[key] = value
-	b.instructions = append(b.instructions, instruction{op: "ENV", args: []string{key, value}})
+	b.instructions = append(b.instructions, instruction{Type: instTypeEnv, Args: []string{key, value}})
 	return b
 }
 
 // Expose documents a port.
 func (b *Builder) Expose(port int) *Builder {
-	b.instructions = append(b.instructions, instruction{op: "EXPOSE", args: []string{fmt.Sprintf("%d", port)}})
+	b.instructions = append(b.instructions, instruction{Type: instTypeExpose, Args: []string{fmt.Sprintf("%d", port)}})
 	return b
 }
 
-// Entrypoint sets the container entrypoint.
+// Entrypoint sets the container entrypoint. Retained for Dockerfile-level
+// parity; the server build API has no direct ENTRYPOINT step, so serialize()
+// does not emit one.
 func (b *Builder) Entrypoint(cmd string) *Builder {
-	b.instructions = append(b.instructions, instruction{op: "ENTRYPOINT", args: []string{cmd}})
+	b.instructions = append(b.instructions, instruction{Type: instType("ENTRYPOINT"), Args: []string{cmd}})
 	return b
 }
 
@@ -181,27 +237,138 @@ func (b *Builder) ToDockerfile() (string, error) {
 		fmt.Fprintf(&sb, "FROM %s\n", b.baseImage)
 	}
 	for _, ins := range b.instructions {
-		switch ins.op {
-		case "__raw":
-			sb.WriteString(ins.args[0])
-			if !strings.HasSuffix(ins.args[0], "\n") {
+		switch ins.Type {
+		case instTypeRaw:
+			sb.WriteString(ins.Args[0])
+			if !strings.HasSuffix(ins.Args[0], "\n") {
 				sb.WriteByte('\n')
 			}
-		case "RUN":
-			fmt.Fprintf(&sb, "RUN %s\n", ins.args[0])
-		case "COPY":
-			fmt.Fprintf(&sb, "COPY %s %s\n", ins.args[0], ins.args[1])
-		case "WORKDIR":
-			fmt.Fprintf(&sb, "WORKDIR %s\n", ins.args[0])
-		case "ENV":
-			fmt.Fprintf(&sb, "ENV %s=%q\n", ins.args[0], ins.args[1])
-		case "EXPOSE":
-			fmt.Fprintf(&sb, "EXPOSE %s\n", ins.args[0])
-		case "ENTRYPOINT":
-			fmt.Fprintf(&sb, "ENTRYPOINT %s\n", ins.args[0])
+		case instTypeRun:
+			fmt.Fprintf(&sb, "RUN %s\n", ins.Args[0])
+		case instTypeCopy:
+			fmt.Fprintf(&sb, "COPY %s %s\n", ins.Args[0], ins.Args[1])
+		case instTypeWorkdir:
+			fmt.Fprintf(&sb, "WORKDIR %s\n", ins.Args[0])
+		case instTypeEnv:
+			fmt.Fprintf(&sb, "ENV %s=%q\n", ins.Args[0], ins.Args[1])
+		case instTypeExpose:
+			fmt.Fprintf(&sb, "EXPOSE %s\n", ins.Args[0])
+		case instType("ENTRYPOINT"):
+			fmt.Fprintf(&sb, "ENTRYPOINT %s\n", ins.Args[0])
 		}
 	}
 	return sb.String(), nil
+}
+
+// instructionsWithHashes returns a copy of b.instructions with FilesHash
+// populated for every COPY step. When any COPY exists but no build context is
+// configured it returns an InvalidArgumentError.
+func (b *Builder) instructionsWithHashes() ([]instruction, error) {
+	out := make([]instruction, len(b.instructions))
+	copy(out, b.instructions)
+
+	hasCopy := false
+	for i := range out {
+		if out[i].Type == instTypeCopy {
+			hasCopy = true
+			break
+		}
+	}
+	if hasCopy && b.contextDir == "" {
+		return nil, &e2b.InvalidArgumentError{Message: "COPY requires WithContext(dir) to be set on the builder"}
+	}
+
+	// Combine explicit ignore patterns with anything found in .dockerignore
+	// inside the context, mirroring the Python SDK.
+	var ignore []string
+	if b.contextDir != "" {
+		ignore = append(ignore, b.ignorePatterns...)
+		ignore = append(ignore, readDockerignore(b.contextDir)...)
+	}
+
+	for i := range out {
+		if out[i].Type != instTypeCopy {
+			continue
+		}
+		src := out[i].Args[0]
+		dst := ""
+		if len(out[i].Args) > 1 {
+			dst = out[i].Args[1]
+		}
+		resolve := defaultResolveSymlinks
+		if out[i].ResolveSymlinks != nil {
+			resolve = *out[i].ResolveSymlinks
+		}
+		h, err := calculateFilesHash(src, dst, b.contextDir, ignore, resolve)
+		if err != nil {
+			return nil, err
+		}
+		out[i].FilesHash = h
+	}
+	return out, nil
+}
+
+// serialize converts the builder into the TemplateBuildStartV2 body expected
+// by the build API. It runs COPY hashing via instructionsWithHashes and
+// skips raw-Dockerfile entries which have no structured representation.
+func (b *Builder) serialize(force bool) (*apiclient.TemplateBuildStartV2, error) {
+	if b.err != nil {
+		return nil, b.err
+	}
+	steps, err := b.instructionsWithHashes()
+	if err != nil {
+		return nil, err
+	}
+
+	body := &apiclient.TemplateBuildStartV2{}
+	if force {
+		f := true
+		body.Force = &f
+	}
+	if b.baseImage != "" {
+		img := b.baseImage
+		body.FromImage = &img
+	}
+	if b.baseTemplate != "" {
+		tpl := b.baseTemplate
+		body.FromTemplate = &tpl
+	}
+	if b.registryConfig != nil {
+		body.FromImageRegistry = b.registryConfig
+	}
+	if b.startCmd != "" {
+		s := b.startCmd
+		body.StartCmd = &s
+	}
+	if b.readyCmd != "" {
+		r := b.readyCmd
+		body.ReadyCmd = &r
+	}
+
+	apiSteps := make([]apiclient.TemplateStep, 0, len(steps))
+	for _, ins := range steps {
+		// Skip raw Dockerfile blobs: they have no TemplateStep mapping.
+		if ins.Type == instTypeRaw {
+			continue
+		}
+		step := apiclient.TemplateStep{Type: string(ins.Type)}
+		if len(ins.Args) > 0 {
+			args := make([]string, len(ins.Args))
+			copy(args, ins.Args)
+			step.Args = &args
+		}
+		if ins.Force {
+			f := true
+			step.Force = &f
+		}
+		if ins.FilesHash != "" {
+			h := ins.FilesHash
+			step.FilesHash = &h
+		}
+		apiSteps = append(apiSteps, step)
+	}
+	body.Steps = &apiSteps
+	return body, nil
 }
 
 // BuildOptions configures a server-side build.
