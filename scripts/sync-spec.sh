@@ -3,8 +3,8 @@
 # regenerate client code.
 #
 # Usage:
-#   scripts/sync-spec.sh                         # sync to latest python-sdk tag
-#   scripts/sync-spec.sh python-sdk@2.20.0       # sync to explicit tag
+#   scripts/sync-spec.sh                         # sync to latest e2b tag
+#   scripts/sync-spec.sh e2b@2.19.0              # sync to explicit tag
 #   scripts/sync-spec.sh --ref main              # sync to a branch ref
 #   scripts/sync-spec.sh --skip-fetch            # don't hit the network
 #
@@ -73,9 +73,9 @@ fi
 # --- resolve target ----------------------------------------------------------
 
 if [[ -z "$TAG" ]]; then
-  # Pick the newest python-sdk tag by version sort.
-  TAG="$(git -C "$SUBMODULE_DIR" tag --list 'python-sdk@*' --sort=-v:refname | head -n1)"
-  [[ -n "$TAG" ]] || die "no python-sdk@* tags found; pass one explicitly"
+  # Pick the newest e2b tag by version sort.
+  TAG="$(git -C "$SUBMODULE_DIR" tag --list 'e2b@*' --sort=-v:refname | head -n1)"
+  [[ -n "$TAG" ]] || die "no e2b@* tags found; pass one explicitly"
   log "latest upstream tag: $TAG"
 fi
 
@@ -83,7 +83,7 @@ if $USE_REF; then
   RESOLVED="$TAG"
 else
   git -C "$SUBMODULE_DIR" rev-parse -q --verify "refs/tags/$TAG" >/dev/null || {
-    die "tag not found: $TAG (run: git -C E2B tag --list 'python-sdk@*')"
+    die "tag not found: $TAG (run: git -C E2B tag --list 'e2b@*')"
   }
   RESOLVED="refs/tags/$TAG"
 fi

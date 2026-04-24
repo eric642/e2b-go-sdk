@@ -2,8 +2,8 @@ GOBIN ?= $(shell go env GOPATH)/bin
 PATH  := $(GOBIN):$(PATH)
 
 # Upstream E2B tag to track. Override on the CLI, e.g.:
-#   make sync-spec E2B_TAG=python-sdk@2.20.0
-# Default: the script picks the newest python-sdk@* tag.
+#   make sync-spec E2B_TAG=e2b@2.19.0
+# Default: the script picks the newest e2b@* tag.
 E2B_TAG ?=
 
 .PHONY: tools sync-spec codegen codegen-proto codegen-api regen \
