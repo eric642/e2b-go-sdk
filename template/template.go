@@ -607,6 +607,203 @@ func (b *Builder) MakeSymlink(src, dest string, opts ...SymlinkOption) *Builder 
 	return b.runAs(strings.Join(cmd, " "), o.user)
 }
 
+// -- Pip ------------------------------------------------------------------
+
+// PipOption configures Builder.PipInstall.
+type PipOption func(*pipOpts)
+type pipOpts struct{ userInstall bool }
+
+// WithPipUserInstall appends --user to the pip invocation and clears the
+// default user (so the command does not force root).
+func WithPipUserInstall() PipOption { return func(o *pipOpts) { o.userInstall = true } }
+
+// PipInstall emits a RUN that installs Python packages via pip. With a nil or
+// empty packages slice it falls back to "pip install ." (install current
+// directory). The default user is root; WithPipUserInstall clears that and
+// appends --user.
+func (b *Builder) PipInstall(packages []string, opts ...PipOption) *Builder {
+	o := pipOpts{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	parts := []string{"pip", "install"}
+	if o.userInstall {
+		parts = append(parts, "--user")
+	}
+	if len(packages) > 0 {
+		parts = append(parts, packages...)
+	} else {
+		parts = append(parts, ".")
+	}
+	user := "root"
+	if o.userInstall {
+		user = ""
+	}
+	return b.runAs(strings.Join(parts, " "), user)
+}
+
+// -- Npm ------------------------------------------------------------------
+
+// NpmOption configures Builder.NpmInstall.
+type NpmOption func(*npmOpts)
+type npmOpts struct{ global, dev bool }
+
+// WithNpmGlobal appends -g to the npm invocation and sets the user to root.
+func WithNpmGlobal() NpmOption { return func(o *npmOpts) { o.global = true } }
+
+// WithNpmDev appends --save-dev to the npm invocation.
+func WithNpmDev() NpmOption { return func(o *npmOpts) { o.dev = true } }
+
+// NpmInstall emits a RUN that installs Node packages via npm. Nil/empty
+// packages produce a bare "npm install" (install dependencies from
+// package.json).
+func (b *Builder) NpmInstall(packages []string, opts ...NpmOption) *Builder {
+	o := npmOpts{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	parts := []string{"npm", "install"}
+	if o.global {
+		parts = append(parts, "-g")
+	}
+	if o.dev {
+		parts = append(parts, "--save-dev")
+	}
+	if len(packages) > 0 {
+		parts = append(parts, packages...)
+	}
+	user := ""
+	if o.global {
+		user = "root"
+	}
+	return b.runAs(strings.Join(parts, " "), user)
+}
+
+// -- Bun ------------------------------------------------------------------
+
+// BunOption configures Builder.BunInstall.
+type BunOption func(*bunOpts)
+type bunOpts struct{ global, dev bool }
+
+// WithBunGlobal appends -g to the bun invocation and sets the user to root.
+func WithBunGlobal() BunOption { return func(o *bunOpts) { o.global = true } }
+
+// WithBunDev appends --dev to the bun invocation (bun's equivalent of
+// npm's --save-dev).
+func WithBunDev() BunOption { return func(o *bunOpts) { o.dev = true } }
+
+// BunInstall emits a RUN that installs JS/TS packages via bun. Nil/empty
+// packages produce a bare "bun install".
+func (b *Builder) BunInstall(packages []string, opts ...BunOption) *Builder {
+	o := bunOpts{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	parts := []string{"bun", "install"}
+	if o.global {
+		parts = append(parts, "-g")
+	}
+	if o.dev {
+		parts = append(parts, "--dev")
+	}
+	if len(packages) > 0 {
+		parts = append(parts, packages...)
+	}
+	user := ""
+	if o.global {
+		user = "root"
+	}
+	return b.runAs(strings.Join(parts, " "), user)
+}
+
+// -- Apt ------------------------------------------------------------------
+
+// AptOption configures Builder.AptInstall.
+type AptOption func(*aptOpts)
+type aptOpts struct{ noRecommends, fixMissing bool }
+
+// WithAptNoInstallRecommends passes --no-install-recommends to apt-get install.
+func WithAptNoInstallRecommends() AptOption {
+	return func(o *aptOpts) { o.noRecommends = true }
+}
+
+// WithAptFixMissing passes --fix-missing to apt-get install.
+func WithAptFixMissing() AptOption { return func(o *aptOpts) { o.fixMissing = true } }
+
+// AptInstall emits the Python SDK's canonical
+// "apt-get update && apt-get install -y ..." one-liner so the update and
+// install share a single cache layer and partial updates never go stale.
+// Each flag literal carries its own trailing space; that space is consumed
+// by the space before the packages join, which is why no explicit
+// TrimRight is needed. Callers are expected to pass at least one package.
+func (b *Builder) AptInstall(packages []string, opts ...AptOption) *Builder {
+	o := aptOpts{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	flags := ""
+	if o.noRecommends {
+		flags += "--no-install-recommends "
+	}
+	if o.fixMissing {
+		flags += "--fix-missing "
+	}
+	install := "DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes apt-get install -y " + flags + strings.Join(packages, " ")
+	return b.runAs("apt-get update && "+install, "root")
+}
+
+// -- Git clone ------------------------------------------------------------
+
+// GitCloneOption configures Builder.GitClone.
+type GitCloneOption func(*gitOpts)
+type gitOpts struct {
+	branch string
+	depth  int
+	path   string
+	user   string
+}
+
+// WithGitBranch checks out the given branch via --branch + --single-branch.
+func WithGitBranch(branch string) GitCloneOption {
+	return func(o *gitOpts) { o.branch = branch }
+}
+
+// WithGitDepth sets the clone depth (shallow clone when > 0).
+func WithGitDepth(depth int) GitCloneOption {
+	return func(o *gitOpts) { o.depth = depth }
+}
+
+// WithGitPath clones into the given local path.
+func WithGitPath(path string) GitCloneOption {
+	return func(o *gitOpts) { o.path = path }
+}
+
+// WithGitUser runs the git clone command as the given user.
+func WithGitUser(user string) GitCloneOption {
+	return func(o *gitOpts) { o.user = user }
+}
+
+// GitClone emits a RUN that clones the given URL. Branch, depth, and path
+// options append their tokens in the order git expects (branch adds three
+// tokens, depth adds two, path adds one).
+func (b *Builder) GitClone(url string, opts ...GitCloneOption) *Builder {
+	o := gitOpts{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	parts := []string{"git", "clone", url}
+	if o.branch != "" {
+		parts = append(parts, "--branch", o.branch, "--single-branch")
+	}
+	if o.depth > 0 {
+		parts = append(parts, "--depth", fmt.Sprint(o.depth))
+	}
+	if o.path != "" {
+		parts = append(parts, o.path)
+	}
+	return b.runAs(strings.Join(parts, " "), o.user)
+}
+
 // instructionsWithHashes returns a copy of b.instructions with FilesHash
 // populated for every COPY step. When any COPY exists but no build context is
 // configured it returns an InvalidArgumentError.
