@@ -123,7 +123,7 @@ func (b *Builder) FromTemplate(templateID string) *Builder {
 
 // FromDockerfile replaces the builder with a raw Dockerfile.
 func (b *Builder) FromDockerfile(contents string) *Builder {
-	b.instructions = append(b.instructions, instruction{Type: instTypeRaw, Args: []string{contents}})
+	b.instructions = append(b.instructions, instruction{Type: instTypeRaw, Args: []string{contents}, Force: b.consumeForce()})
 	return b
 }
 
@@ -144,7 +144,7 @@ func (b *Builder) WithIgnore(patterns ...string) *Builder {
 
 // Run adds a RUN instruction.
 func (b *Builder) Run(cmd string) *Builder {
-	b.instructions = append(b.instructions, instruction{Type: instTypeRun, Args: []string{cmd}})
+	b.instructions = append(b.instructions, instruction{Type: instTypeRun, Args: []string{cmd}, Force: b.consumeForce()})
 	return b
 }
 
@@ -152,7 +152,7 @@ func (b *Builder) Run(cmd string) *Builder {
 // slice carries four positional slots — src, dst, user, mode — with user and
 // mode left empty here; later tasks extend the options surface.
 func (b *Builder) Copy(src, dst string) *Builder {
-	b.instructions = append(b.instructions, instruction{Type: instTypeCopy, Args: []string{src, dst, "", ""}})
+	b.instructions = append(b.instructions, instruction{Type: instTypeCopy, Args: []string{src, dst, "", ""}, Force: b.consumeForce()})
 	return b
 }
 
@@ -160,7 +160,7 @@ func (b *Builder) Copy(src, dst string) *Builder {
 // persists the value for later fluent calls.
 func (b *Builder) Workdir(path string) *Builder {
 	b.workdir = path
-	b.instructions = append(b.instructions, instruction{Type: instTypeWorkdir, Args: []string{path}})
+	b.instructions = append(b.instructions, instruction{Type: instTypeWorkdir, Args: []string{path}, Force: b.consumeForce()})
 	return b
 }
 
@@ -170,13 +170,13 @@ func (b *Builder) Env(key, value string) *Builder {
 		b.envs = map[string]string{}
 	}
 	b.envs[key] = value
-	b.instructions = append(b.instructions, instruction{Type: instTypeEnv, Args: []string{key, value}})
+	b.instructions = append(b.instructions, instruction{Type: instTypeEnv, Args: []string{key, value}, Force: b.consumeForce()})
 	return b
 }
 
 // Expose documents a port.
 func (b *Builder) Expose(port int) *Builder {
-	b.instructions = append(b.instructions, instruction{Type: instTypeExpose, Args: []string{fmt.Sprintf("%d", port)}})
+	b.instructions = append(b.instructions, instruction{Type: instTypeExpose, Args: []string{fmt.Sprintf("%d", port)}, Force: b.consumeForce()})
 	return b
 }
 
@@ -184,7 +184,15 @@ func (b *Builder) Expose(port int) *Builder {
 // parity; the server build API has no direct ENTRYPOINT step, so serialize()
 // does not emit one.
 func (b *Builder) Entrypoint(cmd string) *Builder {
-	b.instructions = append(b.instructions, instruction{Type: instType("ENTRYPOINT"), Args: []string{cmd}})
+	b.instructions = append(b.instructions, instruction{Type: instType("ENTRYPOINT"), Args: []string{cmd}, Force: b.consumeForce()})
+	return b
+}
+
+// SkipCache marks the next instruction as force-rebuilt, ignoring the
+// upstream cache. Chain before any instruction to invalidate just that
+// layer; the flag resets after the next instruction is added.
+func (b *Builder) SkipCache() *Builder {
+	b.forceNextLayer = true
 	return b
 }
 
@@ -257,6 +265,15 @@ func (b *Builder) ToDockerfile() (string, error) {
 		}
 	}
 	return sb.String(), nil
+}
+
+// consumeForce returns the current per-layer force flag and resets it.
+// Called by every method that appends an instruction, so SkipCache() only
+// marks the immediately following instruction.
+func (b *Builder) consumeForce() bool {
+	f := b.forceNextLayer
+	b.forceNextLayer = false
+	return f
 }
 
 // instructionsWithHashes returns a copy of b.instructions with FilesHash
