@@ -279,10 +279,10 @@ func (b *Builder) instructionsWithHashes() ([]instruction, error) {
 	}
 
 	// Combine explicit ignore patterns with anything found in .dockerignore
-	// inside the context, mirroring the Python SDK.
-	var ignore []string
+	// inside the context, mirroring the Python SDK. Caller-supplied patterns
+	// apply whether or not a context dir is set, so they are never dropped.
+	ignore := append([]string(nil), b.ignorePatterns...)
 	if b.contextDir != "" {
-		ignore = append(ignore, b.ignorePatterns...)
 		ignore = append(ignore, readDockerignore(b.contextDir)...)
 	}
 

@@ -1,9 +1,6 @@
 package template
 
-import (
-	"path/filepath"
-	"testing"
-)
+import "testing"
 
 func TestInstructionsWithHashes_ComputesCopyHash(t *testing.T) {
 	ctx := t.TempDir()
@@ -46,6 +43,9 @@ func TestSerialize_ShapesAPIBody(t *testing.T) {
 	if body.Steps == nil || len(*body.Steps) != 1 || (*body.Steps)[0].Type != "RUN" {
 		t.Fatalf("steps: %#v", body.Steps)
 	}
+	if body.Force != nil {
+		t.Fatalf("force should be omitted when arg is false, got %v", *body.Force)
+	}
 }
 
 func TestSerialize_IncludesCopyHash(t *testing.T) {
@@ -63,5 +63,4 @@ func TestSerialize_IncludesCopyHash(t *testing.T) {
 	if step.Type != "COPY" || step.FilesHash == nil || *step.FilesHash == "" {
 		t.Fatalf("copy step missing hash: %#v", step)
 	}
-	_ = filepath.Clean // silence import
 }
