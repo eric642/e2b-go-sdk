@@ -408,6 +408,73 @@ func (b *Builder) runAs(cmd, user string) *Builder {
 	return b
 }
 
+// -- RunCmd / RunCmds -----------------------------------------------------
+
+// RunOption configures Builder.RunCmd and Builder.RunCmds.
+type RunOption func(*runOpts)
+type runOpts struct {
+	user string
+}
+
+// WithRunUser runs the command as the given user.
+func WithRunUser(u string) RunOption { return func(o *runOpts) { o.user = u } }
+
+// RunCmd appends a RUN instruction for a single shell command, with an
+// optional user selection via WithRunUser.
+func (b *Builder) RunCmd(cmd string, opts ...RunOption) *Builder {
+	o := runOpts{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return b.runAs(cmd, o.user)
+}
+
+// RunCmds joins the commands with " && " and delegates to RunCmd so the
+// server sees a single RUN step.
+func (b *Builder) RunCmds(cmds []string, opts ...RunOption) *Builder {
+	return b.RunCmd(strings.Join(cmds, " && "), opts...)
+}
+
+// -- SetWorkdir / SetUser / SetEnvs --------------------------------------
+
+// SetWorkdir emits a WORKDIR instruction with the given path.
+func (b *Builder) SetWorkdir(path string) *Builder {
+	b.instructions = append(b.instructions, instruction{
+		Type:  instTypeWorkdir,
+		Args:  []string{path},
+		Force: b.consumeForce(),
+	})
+	return b
+}
+
+// SetUser emits a USER instruction that switches the default build user.
+func (b *Builder) SetUser(user string) *Builder {
+	b.instructions = append(b.instructions, instruction{
+		Type:  instTypeUser,
+		Args:  []string{user},
+		Force: b.consumeForce(),
+	})
+	return b
+}
+
+// SetEnvs emits a single ENV instruction whose Args interleave keys and
+// values (k1, v1, k2, v2, ...). An empty or nil map is a no-op.
+func (b *Builder) SetEnvs(envs map[string]string) *Builder {
+	if len(envs) == 0 {
+		return b
+	}
+	args := make([]string, 0, 2*len(envs))
+	for k, v := range envs {
+		args = append(args, k, v)
+	}
+	b.instructions = append(b.instructions, instruction{
+		Type:  instTypeEnv,
+		Args:  args,
+		Force: b.consumeForce(),
+	})
+	return b
+}
+
 // -- Remove ---------------------------------------------------------------
 
 // RemoveOption configures Builder.Remove.
