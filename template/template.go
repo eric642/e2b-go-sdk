@@ -392,6 +392,154 @@ func (b *Builder) consumeForce() bool {
 	return f
 }
 
+// runAs appends a RUN instruction with an optional user argument. The user,
+// when provided, becomes Args[1] so later serialization can route it to the
+// server's RUN step user field.
+func (b *Builder) runAs(cmd, user string) *Builder {
+	args := []string{cmd}
+	if user != "" {
+		args = append(args, user)
+	}
+	b.instructions = append(b.instructions, instruction{
+		Type:  instTypeRun,
+		Args:  args,
+		Force: b.consumeForce(),
+	})
+	return b
+}
+
+// -- Remove ---------------------------------------------------------------
+
+// RemoveOption configures Builder.Remove.
+type RemoveOption func(*removeOpts)
+type removeOpts struct {
+	force     bool
+	recursive bool
+	user      string
+}
+
+// WithRemoveForce adds -f to the emitted rm command.
+func WithRemoveForce() RemoveOption { return func(o *removeOpts) { o.force = true } }
+
+// WithRemoveRecursive adds -r to the emitted rm command.
+func WithRemoveRecursive() RemoveOption { return func(o *removeOpts) { o.recursive = true } }
+
+// WithRemoveUser runs the rm command as the given user.
+func WithRemoveUser(u string) RemoveOption {
+	return func(o *removeOpts) { o.user = u }
+}
+
+// Remove deletes files or directories inside the template during build.
+func (b *Builder) Remove(paths []string, opts ...RemoveOption) *Builder {
+	o := removeOpts{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	cmd := []string{"rm"}
+	if o.recursive {
+		cmd = append(cmd, "-r")
+	}
+	if o.force {
+		cmd = append(cmd, "-f")
+	}
+	cmd = append(cmd, paths...)
+	return b.runAs(strings.Join(cmd, " "), o.user)
+}
+
+// -- Rename ---------------------------------------------------------------
+
+// RenameOption configures Builder.Rename.
+type RenameOption func(*renameOpts)
+type renameOpts struct {
+	force bool
+	user  string
+}
+
+// WithRenameForce adds -f to the emitted mv command.
+func WithRenameForce() RenameOption { return func(o *renameOpts) { o.force = true } }
+
+// WithRenameUser runs the mv command as the given user.
+func WithRenameUser(u string) RenameOption {
+	return func(o *renameOpts) { o.user = u }
+}
+
+// Rename moves src to dest inside the template during build.
+func (b *Builder) Rename(src, dest string, opts ...RenameOption) *Builder {
+	o := renameOpts{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	cmd := []string{"mv", src, dest}
+	if o.force {
+		cmd = append(cmd, "-f")
+	}
+	return b.runAs(strings.Join(cmd, " "), o.user)
+}
+
+// -- MakeDir --------------------------------------------------------------
+
+// MkdirOption configures Builder.MakeDir.
+type MkdirOption func(*mkdirOpts)
+type mkdirOpts struct {
+	mode    os.FileMode
+	hasMode bool
+	user    string
+}
+
+// WithMkdirMode sets the mode bits passed to mkdir via -m.
+func WithMkdirMode(m os.FileMode) MkdirOption {
+	return func(o *mkdirOpts) { o.mode = m; o.hasMode = true }
+}
+
+// WithMkdirUser runs the mkdir command as the given user.
+func WithMkdirUser(u string) MkdirOption { return func(o *mkdirOpts) { o.user = u } }
+
+// MakeDir creates one or more directories inside the template during build.
+func (b *Builder) MakeDir(paths []string, opts ...MkdirOption) *Builder {
+	o := mkdirOpts{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	cmd := []string{"mkdir", "-p"}
+	if o.hasMode {
+		cmd = append(cmd, fmt.Sprintf("-m %04o", o.mode))
+	}
+	cmd = append(cmd, paths...)
+	return b.runAs(strings.Join(cmd, " "), o.user)
+}
+
+// -- MakeSymlink ----------------------------------------------------------
+
+// SymlinkOption configures Builder.MakeSymlink.
+type SymlinkOption func(*symOpts)
+type symOpts struct {
+	force bool
+	user  string
+}
+
+// WithSymlinkForce adds -f to the emitted ln command.
+func WithSymlinkForce() SymlinkOption { return func(o *symOpts) { o.force = true } }
+
+// WithSymlinkUser runs the ln command as the given user.
+func WithSymlinkUser(u string) SymlinkOption {
+	return func(o *symOpts) { o.user = u }
+}
+
+// MakeSymlink creates a symbolic link at dest pointing to src inside the
+// template during build.
+func (b *Builder) MakeSymlink(src, dest string, opts ...SymlinkOption) *Builder {
+	o := symOpts{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	cmd := []string{"ln", "-s"}
+	if o.force {
+		cmd = append(cmd, "-f")
+	}
+	cmd = append(cmd, src, dest)
+	return b.runAs(strings.Join(cmd, " "), o.user)
+}
+
 // instructionsWithHashes returns a copy of b.instructions with FilesHash
 // populated for every COPY step. When any COPY exists but no build context is
 // configured it returns an InvalidArgumentError.
