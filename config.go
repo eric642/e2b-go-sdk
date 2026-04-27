@@ -157,6 +157,16 @@ func (c Config) httpClient() *http.Client {
 	return &http.Client{Timeout: c.RequestTimeout}
 }
 
+// Resolve returns a Config copy with environment-variable fallbacks and
+// defaults applied. Safe to call on a zero Config.
+func (c Config) Resolve() Config { return c.resolve() }
+
+// ResolvedHTTPClient returns the HTTP client this Config would use: the
+// HTTPClient field if set, else a fresh *http.Client with RequestTimeout.
+// Named with the Resolved- prefix because it would otherwise collide with
+// the HTTPClient struct field.
+func (c Config) ResolvedHTTPClient() *http.Client { return c.httpClient() }
+
 // itoa avoids strconv dependency for hot paths.
 func itoa(n int) string {
 	if n == 0 {
