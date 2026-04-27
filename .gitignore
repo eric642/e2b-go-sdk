@@ -1,1 +1,5 @@
 .env
+
+# Compiled example binaries
+/lifecycle
+/lifecycle_v2
