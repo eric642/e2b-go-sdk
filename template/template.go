@@ -116,6 +116,33 @@ func (b *Builder) FromGoImage(tag string) *Builder {
 	return b.FromImage("golang:" + tag)
 }
 
+// FromDebianImage starts a template from an official Debian image. The
+// default variant is "stable".
+func (b *Builder) FromDebianImage(variant string) *Builder {
+	if variant == "" {
+		variant = "stable"
+	}
+	return b.FromImage("debian:" + variant)
+}
+
+// FromUbuntuImage starts a template from an official Ubuntu image. The
+// default variant is "latest".
+func (b *Builder) FromUbuntuImage(variant string) *Builder {
+	if variant == "" {
+		variant = "latest"
+	}
+	return b.FromImage("ubuntu:" + variant)
+}
+
+// FromBunImage starts a template from an official Bun image. The default
+// variant is "latest".
+func (b *Builder) FromBunImage(variant string) *Builder {
+	if variant == "" {
+		variant = "latest"
+	}
+	return b.FromImage("oven/bun:" + variant)
+}
+
 // FromTemplate bases this template on another E2B template.
 func (b *Builder) FromTemplate(templateID string) *Builder {
 	b.baseTemplate = templateID
