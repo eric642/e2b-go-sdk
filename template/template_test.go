@@ -67,7 +67,8 @@ func TestFromDockerfileAppendsRaw(t *testing.T) {
 
 func TestSetStartCmdStoresBoth(t *testing.T) {
 	ready := WaitForPort(3000)
-	b := New().SetStartCmd("node server.js", &ready)
+	f := New().SetStartCmd("node server.js", ready)
+	b := f.Builder()
 	if b.StartCmd() != "node server.js" {
 		t.Fatalf("StartCmd: %q", b.StartCmd())
 	}
@@ -77,18 +78,20 @@ func TestSetStartCmdStoresBoth(t *testing.T) {
 }
 
 func TestSetStartCmdWithoutReady(t *testing.T) {
-	b := New().SetStartCmd("run", nil)
+	f := New().SetStartCmd("run", ReadyCmd{})
+	b := f.Builder()
 	if b.StartCmd() != "run" {
 		t.Fatalf("StartCmd: %q", b.StartCmd())
 	}
 	if b.ReadyCmdString() != "" {
-		t.Fatalf("ReadyCmdString should be empty when nil ReadyCmd passed, got %q", b.ReadyCmdString())
+		t.Fatalf("ReadyCmdString should be empty for zero ReadyCmd, got %q", b.ReadyCmdString())
 	}
 }
 
 func TestSetReadyCmdOnly(t *testing.T) {
 	r := WaitForFile("/tmp/ready")
-	b := New().SetReadyCmd(r)
+	f := New().SetReadyCmd(r)
+	b := f.Builder()
 	if b.ReadyCmdString() != r.Cmd() {
 		t.Fatalf("ReadyCmdString: %q vs %q", b.ReadyCmdString(), r.Cmd())
 	}

@@ -399,20 +399,18 @@ func (b *Builder) SkipCache() *Builder {
 	return b
 }
 
-// SetStartCmd records the command run when a sandbox boots, plus an
-// optional readiness check.
-func (b *Builder) SetStartCmd(cmd string, ready *ReadyCmd) *Builder {
+// SetStartCmd records the command run when a sandbox boots, plus the readiness
+// check to wait on. Pass ReadyCmd{} to opt out of a readiness check.
+func (b *Builder) SetStartCmd(cmd string, ready ReadyCmd) *FinalBuilder {
 	b.startCmd = cmd
-	if ready != nil {
-		b.readyCmd = ready.cmd
-	}
-	return b
+	b.readyCmd = ready.Cmd()
+	return &FinalBuilder{b: b}
 }
 
-// SetReadyCmd sets only the readiness check.
-func (b *Builder) SetReadyCmd(ready ReadyCmd) *Builder {
-	b.readyCmd = ready.cmd
-	return b
+// SetReadyCmd sets only the readiness check and finalizes the builder.
+func (b *Builder) SetReadyCmd(ready ReadyCmd) *FinalBuilder {
+	b.readyCmd = ready.Cmd()
+	return &FinalBuilder{b: b}
 }
 
 // SetTag tags the final template (e.g. "my-template:v2").
@@ -919,6 +917,22 @@ func (b *Builder) BetaDevContainerPrebuild(dir string) *Builder {
 	return b.runAs("devcontainer build --workspace-folder "+dir, "root")
 }
 
+// BetaSetDevContainerStart wires the devcontainer-specific start+ready
+// commands to a workspace directory. Requires FromTemplate("devcontainer").
+func (b *Builder) BetaSetDevContainerStart(dir string) *FinalBuilder {
+	if b.baseTemplate != "devcontainer" {
+		if b.err == nil {
+			b.err = &e2b.InvalidArgumentError{Message: "devcontainer start requires devcontainer base template"}
+		}
+		return &FinalBuilder{b: b}
+	}
+	b.startCmd = "sudo devcontainer up --workspace-folder " + dir +
+		" && sudo /prepare-exec.sh " + dir +
+		" | sudo tee /devcontainer.sh > /dev/null && sudo chmod +x /devcontainer.sh && sudo touch /devcontainer.up"
+	b.readyCmd = WaitForFile("/devcontainer.up").Cmd()
+	return &FinalBuilder{b: b}
+}
+
 // instructionsWithHashes returns a copy of b.instructions with FilesHash
 // populated for every COPY step. When any COPY exists but no build context is
 // configured it returns an InvalidArgumentError.
@@ -1029,4 +1043,18 @@ func (b *Builder) serialize(force bool) (*apiclient.TemplateBuildStartV2, error)
 	body.Steps = &apiSteps
 	return body, nil
 }
+
+// FinalBuilder is the terminal state of the fluent API. After setting the
+// start/ready commands, callers may only serialize or hand off to the Client.
+type FinalBuilder struct {
+	b *Builder
+}
+
+// Builder returns the underlying *Builder. Use sparingly; the point of
+// FinalBuilder is to discourage adding more instructions. Required by the
+// Client so it can call serialize/instructionsWithHashes.
+func (f *FinalBuilder) Builder() *Builder { return f.b }
+
+// ToDockerfile delegates to the underlying Builder.
+func (f *FinalBuilder) ToDockerfile() (string, error) { return f.b.ToDockerfile() }
 
