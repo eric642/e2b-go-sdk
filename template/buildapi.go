@@ -51,6 +51,42 @@ func (c *Client) requestBuild(ctx context.Context, name string, tags []string, c
 	return nil, &BuildError{Op: "request", Err: errors.New("empty response body")}
 }
 
+// requestBuildV2 calls POST /v2/templates. Compared to v3 the payload only
+// carries alias/cpuCount/memoryMB — tags are not supported on this endpoint.
+func (c *Client) requestBuildV2(ctx context.Context, alias string, cpu, mem int32) (*apiclient.TemplateLegacy, error) {
+	body := apiclient.TemplateBuildRequestV2{Alias: alias}
+	if cpu > 0 {
+		cc := apiclient.CPUCount(cpu)
+		body.CpuCount = &cc
+	}
+	if mem > 0 {
+		mm := apiclient.MemoryMB(mem)
+		body.MemoryMB = &mm
+	}
+	resp, err := c.apiCli.PostV2Templates(ctx, body)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, &BuildError{Op: "request", Err: errors.New(resp.Status)}
+	}
+	parsed, err := apiclient.ParsePostV2TemplatesResponse(resp)
+	if err != nil {
+		return nil, err
+	}
+	if parsed.JSON202 != nil {
+		return parsed.JSON202, nil
+	}
+	if len(parsed.Body) > 0 {
+		var out apiclient.TemplateLegacy
+		if err := json.Unmarshal(parsed.Body, &out); err == nil && out.TemplateID != "" {
+			return &out, nil
+		}
+	}
+	return nil, &BuildError{Op: "request", Err: errors.New("empty response body")}
+}
+
 // getFileUploadLink calls GET /templates/{id}/files/{hash}.
 func (c *Client) getFileUploadLink(ctx context.Context, templateID, hash string) (*apiclient.TemplateBuildFileUpload, error) {
 	resp, err := c.apiCli.GetTemplatesTemplateIDFilesHash(ctx, apiclient.TemplateID(templateID), hash)
