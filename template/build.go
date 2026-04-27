@@ -3,6 +3,7 @@ package template
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	e2b "github.com/eric642/e2b-go-sdk"
@@ -112,8 +113,15 @@ func (c *Client) startBuild(ctx context.Context, b *Builder, opts BuildOptions) 
 		if err != nil {
 			return nil, nil, err
 		}
-		shouldUpload := link.Url != nil && (!link.Present || (s.HasForceUpload && s.ForceUpload))
-		if !shouldUpload {
+		needsUpload := !link.Present || (s.HasForceUpload && s.ForceUpload)
+		if needsUpload && link.Url == nil {
+			return nil, nil, &UploadError{
+				Src:  s.Args[0],
+				Hash: s.FilesHash,
+				Err:  fmt.Errorf("server reported present=false but returned no upload URL"),
+			}
+		}
+		if !needsUpload {
 			continue
 		}
 		resolve := defaultResolveSymlinks

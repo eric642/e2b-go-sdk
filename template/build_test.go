@@ -158,6 +158,35 @@ func TestBuild_SkipsUploadWhenCached(t *testing.T) {
 	}
 }
 
+func TestBuild_UploadLinkMissingURLFailsFast(t *testing.T) {
+	// Server misbehaves: reports present=false but omits the signed URL.
+	// Client must fail fast with *UploadError rather than plough ahead to
+	// triggerBuild (which would silently produce a mid-build server error).
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v3/templates", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"templateID":"tpl_1","buildID":"bld_1","aliases":[],"names":["demo"],"public":false,"tags":[]}`))
+	})
+	mux.HandleFunc("/templates/tpl_1/files/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"present":false}`)) // no url field
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	writeFile(t, dir, "app.txt", "hello")
+
+	cli, _ := NewClient(e2b.Config{APIKey: "k", APIURL: srv.URL})
+	tpl := New().FromImage("alpine:3").WithContext(dir).Copy("app.txt", "/app/")
+	_, err := cli.Build(context.Background(), tpl, BuildOptions{Name: "demo", PollInterval: 5 * time.Millisecond})
+	if err == nil {
+		t.Fatal("expected UploadError when server omits url")
+	}
+	var ue *UploadError
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *UploadError, got %T: %v", err, err)
+	}
+}
+
 func TestBuild_ErrorStatusReturnsBuildError(t *testing.T) {
 	srv, fake := newFakeTemplateServer(t)
 	fake.statusErrMsg = "boom at step 3"

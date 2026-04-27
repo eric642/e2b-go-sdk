@@ -1,12 +1,12 @@
-// Package template provides a fluent builder for E2B sandbox templates.
-// It mirrors the public surface of the Python Template and JS TemplateBase
-// classes. The builder accumulates instructions that can be serialized to a
-// Dockerfile.
+// Package template provides a fluent builder and a Client for building E2B
+// sandbox templates. It mirrors the public surface of the Python Template
+// and JS TemplateBase classes.
 //
-// Note: the server-side build orchestration (tar packaging, file hash
-// pre-check, multi-phase upload, build polling) is not implemented in v1;
-// callers can serialize a template with ToDockerfile and build it through
-// the existing `e2b` CLI until the Go Build() lands.
+// A Builder accumulates instructions and can be serialized with ToDockerfile
+// or ToJSON. To register a template with the E2B backend, construct a
+// Client via NewClient and call Build / BuildStream / BuildInBackground.
+// Client methods honor context cancellation and are safe for concurrent use;
+// a *Builder is not — construct one per goroutine.
 package template
 
 import (
@@ -55,7 +55,9 @@ type instruction struct {
 	FilesHash       string
 }
 
-// Builder constructs a template.
+// Builder constructs a template. A *Builder is not safe for concurrent use
+// — construct one per goroutine, or fully finalize it with SetStartCmd /
+// SetReadyCmd (which return a *FinalBuilder) before handing the result off.
 type Builder struct {
 	baseImage    string
 	baseTemplate string
