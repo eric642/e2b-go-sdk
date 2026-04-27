@@ -79,10 +79,70 @@ func New() *Builder {
 	return &Builder{baseImage: "e2bdev/base"}
 }
 
-// FromImage sets the base Docker image.
-func (b *Builder) FromImage(image string) *Builder {
+// RegistryCredentials carries basic-auth credentials for a private registry.
+type RegistryCredentials struct {
+	Username string
+	Password string
+}
+
+// FromImage sets the base Docker image. An optional RegistryCredentials
+// argument supplies basic-auth credentials for a private registry; only the
+// first value is consulted. When both Username and Password are empty the
+// registry config is left nil.
+func (b *Builder) FromImage(image string, creds ...RegistryCredentials) *Builder {
 	b.baseImage = image
 	b.baseTemplate = ""
+	b.registryConfig = nil
+	if len(creds) > 0 && (creds[0].Username != "" || creds[0].Password != "") {
+		reg := &apiclient.FromImageRegistry{}
+		if err := reg.FromGeneralRegistry(apiclient.GeneralRegistry{
+			Username: creds[0].Username,
+			Password: creds[0].Password,
+		}); err != nil {
+			if b.err == nil {
+				b.err = err
+			}
+			return b
+		}
+		b.registryConfig = reg
+	}
+	return b
+}
+
+// FromAWSRegistry sets the base image and configures AWS ECR authentication.
+func (b *Builder) FromAWSRegistry(image, accessKeyID, secretAccessKey, region string) *Builder {
+	b.baseImage = image
+	b.baseTemplate = ""
+	reg := &apiclient.FromImageRegistry{}
+	if err := reg.FromAWSRegistry(apiclient.AWSRegistry{
+		AwsAccessKeyId:     accessKeyID,
+		AwsSecretAccessKey: secretAccessKey,
+		AwsRegion:          region,
+	}); err != nil {
+		if b.err == nil {
+			b.err = err
+		}
+		return b
+	}
+	b.registryConfig = reg
+	return b
+}
+
+// FromGCPRegistry sets the base image and configures GCP Artifact/Container
+// Registry authentication via a service-account JSON blob.
+func (b *Builder) FromGCPRegistry(image, serviceAccountJSON string) *Builder {
+	b.baseImage = image
+	b.baseTemplate = ""
+	reg := &apiclient.FromImageRegistry{}
+	if err := reg.FromGCPRegistry(apiclient.GCPRegistry{
+		ServiceAccountJson: serviceAccountJSON,
+	}); err != nil {
+		if b.err == nil {
+			b.err = err
+		}
+		return b
+	}
+	b.registryConfig = reg
 	return b
 }
 
