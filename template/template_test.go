@@ -57,9 +57,9 @@ func TestFromDockerfileAppendsRaw(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Because FromImage default is "e2bdev/base", the raw block is appended
-	// AFTER a FROM line. Templates based on raw Dockerfiles should usually
-	// pair with FromImage("") — but we still preserve the raw content.
+	// FromDockerfile now parses the content: the FROM line overrides the
+	// default base image ("e2bdev/base"), and RUN becomes a structured
+	// instruction. ToDockerfile() then re-renders both.
 	if !strings.Contains(df, "FROM alpine") || !strings.Contains(df, "RUN ls") {
 		t.Fatalf("raw block missing: %s", df)
 	}

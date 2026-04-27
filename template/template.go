@@ -10,6 +10,7 @@
 package template
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,9 +32,10 @@ const (
 	instTypeEnv     instType = "ENV"
 	instTypeUser    instType = "USER"
 	instTypeExpose  instType = "EXPOSE"
-	// instTypeRaw is an internal-only marker for raw Dockerfile text captured
-	// via FromDockerfile; it has no server-side TemplateStep representation
-	// and is skipped during serialize().
+	// instTypeRaw is an internal-only marker for raw Dockerfile text. No code
+	// path produces it after FromDockerfile was redirected to the parser;
+	// the ToDockerfile() case is kept for backward compatibility with
+	// callers that may construct instruction{Type: instTypeRaw, ...} by hand.
 	instTypeRaw instType = "__raw"
 )
 
@@ -210,10 +212,10 @@ func (b *Builder) FromTemplate(templateID string) *Builder {
 	return b
 }
 
-// FromDockerfile replaces the builder with a raw Dockerfile.
+// FromDockerfile parses inline Dockerfile content. Deprecated: prefer
+// FromDockerfileContent (clearer name) or FromDockerfileFile.
 func (b *Builder) FromDockerfile(contents string) *Builder {
-	b.instructions = append(b.instructions, instruction{Type: instTypeRaw, Args: []string{contents}, Force: b.consumeForce()})
-	return b
+	return b.FromDockerfileContent(contents)
 }
 
 // WithContext sets the local directory used as the build context for COPY
@@ -433,6 +435,20 @@ func (b *Builder) BaseTemplate() string { return b.baseTemplate }
 
 // Tag returns the tag associated with this template build.
 func (b *Builder) Tag() string { return b.tag }
+
+// ToJSON returns the JSON payload that Client.Build would send to the server,
+// pretty-printed. Useful for inspection and debugging.
+func (b *Builder) ToJSON() (string, error) {
+	body, err := b.serialize(false)
+	if err != nil {
+		return "", err
+	}
+	out, err := json.MarshalIndent(body, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
 
 // ToDockerfile serializes the builder to a Dockerfile. Templates based on
 // another E2B template cannot be serialized and return an error.
@@ -1057,4 +1073,7 @@ func (f *FinalBuilder) Builder() *Builder { return f.b }
 
 // ToDockerfile delegates to the underlying Builder.
 func (f *FinalBuilder) ToDockerfile() (string, error) { return f.b.ToDockerfile() }
+
+// ToJSON delegates to the underlying Builder.
+func (f *FinalBuilder) ToJSON() (string, error) { return f.b.ToJSON() }
 
