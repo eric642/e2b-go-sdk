@@ -144,11 +144,7 @@ func mapBuildStatus(r *apiclient.TemplateBuildInfo) *BuildStatus {
 		Status:     BuildStatusValue(r.Status),
 	}
 	for _, le := range r.LogEntries {
-		bs.Logs = append(bs.Logs, LogEntry{
-			Timestamp: le.Timestamp,
-			Level:     LogLevel(le.Level),
-			Message:   le.Message,
-		})
+		bs.Logs = append(bs.Logs, toLogEntry(le))
 	}
 	if r.Reason != nil {
 		br := &BuildReason{Message: r.Reason.Message}
@@ -157,14 +153,20 @@ func mapBuildStatus(r *apiclient.TemplateBuildInfo) *BuildStatus {
 		}
 		if r.Reason.LogEntries != nil {
 			for _, le := range *r.Reason.LogEntries {
-				br.Logs = append(br.Logs, LogEntry{
-					Timestamp: le.Timestamp,
-					Level:     LogLevel(le.Level),
-					Message:   le.Message,
-				})
+				br.Logs = append(br.Logs, toLogEntry(le))
 			}
 		}
 		bs.Reason = br
 	}
 	return bs
+}
+
+// toLogEntry translates the generated apiclient.BuildLogEntry into our
+// public LogEntry domain type.
+func toLogEntry(le apiclient.BuildLogEntry) LogEntry {
+	return LogEntry{
+		Timestamp: le.Timestamp,
+		Level:     LogLevel(le.Level),
+		Message:   le.Message,
+	}
 }
