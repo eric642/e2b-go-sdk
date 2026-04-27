@@ -1,3 +1,3 @@
 # Hash goldens
 
-Goldens frozen from the Go implementation; reconciled against the Python SDK reference in Task 25.
+Goldens align with the Python SDK's `calculate_files_hash` byte stream; see `template/hash.go` for the algorithm.
