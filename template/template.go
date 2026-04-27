@@ -804,6 +804,34 @@ func (b *Builder) GitClone(url string, opts ...GitCloneOption) *Builder {
 	return b.runAs(strings.Join(parts, " "), o.user)
 }
 
+// -- Beta / base-template-specific methods -------------------------------
+
+// AddMCPServer adds one or more MCP servers using mcp-gateway. Only valid
+// when the builder was initialized with FromTemplate("mcp-gateway"); the
+// error is captured on the builder and surfaced at serialize().
+func (b *Builder) AddMCPServer(servers []string) *Builder {
+	if b.baseTemplate != "mcp-gateway" {
+		if b.err == nil {
+			b.err = &e2b.InvalidArgumentError{Message: "MCP servers can only be added to mcp-gateway template"}
+		}
+		return b
+	}
+	return b.runAs("mcp-gateway pull "+strings.Join(servers, " "), "root")
+}
+
+// BetaDevContainerPrebuild runs a devcontainer build during the template
+// build. Only valid when the builder was initialized with
+// FromTemplate("devcontainer").
+func (b *Builder) BetaDevContainerPrebuild(dir string) *Builder {
+	if b.baseTemplate != "devcontainer" {
+		if b.err == nil {
+			b.err = &e2b.InvalidArgumentError{Message: "devcontainer prebuild requires devcontainer base template"}
+		}
+		return b
+	}
+	return b.runAs("devcontainer build --workspace-folder "+dir, "root")
+}
+
 // instructionsWithHashes returns a copy of b.instructions with FilesHash
 // populated for every COPY step. When any COPY exists but no build context is
 // configured it returns an InvalidArgumentError.
