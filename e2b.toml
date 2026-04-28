@@ -1,0 +1,19 @@
+# This is a config for E2B sandbox template.
+# You can use template ID (0au0x8r4es84joz7qih3) to create a sandbox:
+
+# Python SDK
+# from e2b import Sandbox, AsyncSandbox
+# sandbox = Sandbox("0au0x8r4es84joz7qih3") # Sync sandbox
+# sandbox = await AsyncSandbox.create("0au0x8r4es84joz7qih3") # Async sandbox
+
+# JS SDK
+# import { Sandbox } from 'e2b'
+# const sandbox = await Sandbox.create('0au0x8r4es84joz7qih3')
+
+team_id = "f563ab87-1e6b-413d-ba96-13bb9e2d7328"
+memory_mb = 4_096
+cpu_count = 2
+ready_cmd = "pgrep -x Xvfb >/dev/null && pgrep -f 'websockify.*6080' >/dev/null && pgrep -f 'websockify.*6081' >/dev/null && sudo -u user -H tmux -L main has-session -t main 2>/dev/null"
+start_cmd = "/usr/local/bin/start-desktop.sh"
+dockerfile = "e2b.Dockerfile"
+template_id = "0au0x8r4es84joz7qih3"
