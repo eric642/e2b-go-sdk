@@ -1,9 +1,18 @@
 # E2B Go SDK
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/eric642/e2b-go-sdk.svg)](https://pkg.go.dev/github.com/eric642/e2b-go-sdk)
+[![test](https://github.com/eric642/e2b-go-sdk/actions/workflows/test.yml/badge.svg)](https://github.com/eric642/e2b-go-sdk/actions/workflows/test.yml)
+[![integration](https://github.com/eric642/e2b-go-sdk/actions/workflows/integration.yml/badge.svg)](https://github.com/eric642/e2b-go-sdk/actions/workflows/integration.yml)
+[![License](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](./LICENSE)
+
 A Go client for the [E2B](https://e2b.dev) sandbox platform, ported from the
 official [Python](https://github.com/e2b-dev/E2B/tree/main/packages/python-sdk)
 and [JavaScript](https://github.com/e2b-dev/E2B/tree/main/packages/js-sdk)
 SDKs.
+
+> **Unofficial, community-maintained port.** This module is not published
+> by the E2B team — it tracks the upstream spec but is independent of
+> them. Report SDK issues here; report E2B platform issues upstream.
 
 ## Install
 

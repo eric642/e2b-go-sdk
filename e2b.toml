@@ -1,19 +1,13 @@
-# This is a config for E2B sandbox template.
-# You can use template ID (0au0x8r4es84joz7qih3) to create a sandbox:
+# Example E2B sandbox template config for examples/desktop.
+#
+# Fork users: replace team_id / template_id with your own (run
+# `e2b auth login && e2b template init`) or just delete both lines —
+# the first `e2b template build` will mint new values for your account.
 
-# Python SDK
-# from e2b import Sandbox, AsyncSandbox
-# sandbox = Sandbox("0au0x8r4es84joz7qih3") # Sync sandbox
-# sandbox = await AsyncSandbox.create("0au0x8r4es84joz7qih3") # Async sandbox
-
-# JS SDK
-# import { Sandbox } from 'e2b'
-# const sandbox = await Sandbox.create('0au0x8r4es84joz7qih3')
-
-team_id = "f563ab87-1e6b-413d-ba96-13bb9e2d7328"
+# team_id = "<your-team-uuid>"
+# template_id = "<your-template-id>"
 memory_mb = 4_096
 cpu_count = 2
 ready_cmd = "pgrep -x Xvfb >/dev/null && pgrep -f 'websockify.*6080' >/dev/null && pgrep -f 'websockify.*6081' >/dev/null && sudo -u user -H tmux -L main has-session -t main 2>/dev/null"
 start_cmd = "/usr/local/bin/start-desktop.sh"
 dockerfile = "e2b.Dockerfile"
-template_id = "0au0x8r4es84joz7qih3"
