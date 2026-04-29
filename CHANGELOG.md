@@ -10,6 +10,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-04-29
+
+### Fixed
+
+- LICENSE now uses the verbatim Apache-2.0 text from apache.org so
+  pkg.go.dev's `licensecheck` scan recognises it and renders
+  documentation. `v0.1.0` had a paraphrased copy that failed the
+  pkg.go.dev license gate.
+
 ## [0.1.0] — 2026-04-29
 
 Initial public preview. Pinned to upstream `main` at commit

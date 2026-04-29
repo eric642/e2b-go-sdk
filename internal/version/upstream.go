@@ -13,4 +13,4 @@ const UpstreamCommit = "a6a1156a76753d5e9bbdd9eb7b26e84aa18b24d2"
 // SDKVersion is this Go SDK's release version. Pre-alignment releases use
 // the v0.x line; once we cut a release directly from an upstream `e2b@X.Y.Z`
 // tag we'll switch to matching it 1:1.
-const SDKVersion = "0.1.0"
+const SDKVersion = "0.1.1"
