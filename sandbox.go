@@ -405,9 +405,10 @@ func buildNewSandbox(opts CreateOptions) apiclient.PostSandboxesJSONRequestBody 
 		}
 	}
 	if opts.Lifecycle != nil {
-		if opts.Lifecycle.OnTimeout == "pause" {
+		switch opts.Lifecycle.OnTimeout {
+		case "pause":
 			body.AutoPause = ptrBool(true)
-		} else if opts.Lifecycle.OnTimeout == "kill" {
+		case "kill":
 			body.AutoPause = ptrBool(false)
 		}
 		if opts.Lifecycle.AutoResume {

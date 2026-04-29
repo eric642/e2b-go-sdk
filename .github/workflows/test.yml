@@ -27,7 +27,10 @@ jobs:
         with:
           go-version: '1.26.x'
           check-latest: true
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
-          args: --timeout=5m
+      # The official golangci-lint release binaries are built with an older
+      # Go toolchain than our go.mod (1.26), so they refuse to load our
+      # package graph. Build from source on the runner instead so the
+      # lint binary uses the same Go version we target.
+      - name: Install golangci-lint from source
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+      - run: golangci-lint run --timeout=5m

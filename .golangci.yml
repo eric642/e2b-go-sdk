@@ -1,15 +1,11 @@
+version: "2"
+
 run:
   timeout: 5m
   tests: true
 
-issues:
-  # Generated clients live under internal/ and shouldn't be hand-linted.
-  exclude-dirs:
-    - internal
-    - E2B
-
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
     - govet
@@ -17,12 +13,18 @@ linters:
     - staticcheck
     - unused
 
-linters-settings:
-  errcheck:
-    exclude-functions:
-      - (*os.File).Close
-      - (io.Closer).Close
-  staticcheck:
-    checks:
-      - all
-      - -ST1000
+  exclusions:
+    # Generated clients live under internal/ and shouldn't be hand-linted.
+    paths:
+      - internal
+      - E2B
+
+  settings:
+    errcheck:
+      exclude-functions:
+        - (*os.File).Close
+        - (io.Closer).Close
+    staticcheck:
+      checks:
+        - all
+        - -ST1000

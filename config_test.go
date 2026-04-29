@@ -13,12 +13,14 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{"E2B_DOMAIN", "E2B_API_URL", "E2B_API_KEY", "E2B_ACCESS_TOKEN", "E2B_DEBUG", "E2B_SANDBOX_URL"} {
 		old := os.Getenv(k)
-		os.Unsetenv(k)
+		if err := os.Unsetenv(k); err != nil {
+			t.Fatalf("unset %s: %v", k, err)
+		}
 		t.Cleanup(func() {
 			if old != "" {
-				os.Setenv(k, old)
+				_ = os.Setenv(k, old)
 			} else {
-				os.Unsetenv(k)
+				_ = os.Unsetenv(k)
 			}
 		})
 	}
@@ -65,11 +67,11 @@ func TestSandboxHostNonDebug(t *testing.T) {
 
 func TestConfigEnvFallbacks(t *testing.T) {
 	clearEnv(t)
-	os.Setenv("E2B_API_KEY", "k-from-env")
-	os.Setenv("E2B_ACCESS_TOKEN", "at-from-env")
-	os.Setenv("E2B_DOMAIN", "env.example.com")
-	os.Setenv("E2B_SANDBOX_URL", "https://sbx.env.example.com")
-	os.Setenv("E2B_API_URL", "https://api.env.example.com")
+	t.Setenv("E2B_API_KEY", "k-from-env")
+	t.Setenv("E2B_ACCESS_TOKEN", "at-from-env")
+	t.Setenv("E2B_DOMAIN", "env.example.com")
+	t.Setenv("E2B_SANDBOX_URL", "https://sbx.env.example.com")
+	t.Setenv("E2B_API_URL", "https://api.env.example.com")
 
 	cfg := Config{}.resolve()
 	if cfg.APIKey != "k-from-env" {
@@ -91,9 +93,9 @@ func TestConfigEnvFallbacks(t *testing.T) {
 
 func TestConfigExplicitFieldsWin(t *testing.T) {
 	clearEnv(t)
-	os.Setenv("E2B_API_KEY", "env-key")
-	os.Setenv("E2B_DOMAIN", "env.example.com")
-	os.Setenv("E2B_API_URL", "https://api.env.example.com")
+	t.Setenv("E2B_API_KEY", "env-key")
+	t.Setenv("E2B_DOMAIN", "env.example.com")
+	t.Setenv("E2B_API_URL", "https://api.env.example.com")
 
 	cfg := Config{
 		APIKey: "explicit-key",
@@ -115,7 +117,7 @@ func TestConfigDebugFromEnv(t *testing.T) {
 	for _, v := range []string{"true", "TRUE", "True"} {
 		t.Run(v, func(t *testing.T) {
 			clearEnv(t)
-			os.Setenv("E2B_DEBUG", v)
+			t.Setenv("E2B_DEBUG", v)
 			cfg := Config{}.resolve()
 			if !cfg.Debug {
 				t.Fatalf("Debug should be true for E2B_DEBUG=%q", v)
@@ -124,7 +126,7 @@ func TestConfigDebugFromEnv(t *testing.T) {
 	}
 	t.Run("false", func(t *testing.T) {
 		clearEnv(t)
-		os.Setenv("E2B_DEBUG", "false")
+		t.Setenv("E2B_DEBUG", "false")
 		cfg := Config{}.resolve()
 		if cfg.Debug {
 			t.Fatal("Debug should be false for E2B_DEBUG=false")

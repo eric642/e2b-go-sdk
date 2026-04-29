@@ -41,6 +41,6 @@ func DefaultLogger(w io.Writer) func(LogEntry) {
 		w = os.Stderr
 	}
 	return func(e LogEntry) {
-		fmt.Fprintf(w, "[%s] %s %s\n", e.Timestamp.Format(time.RFC3339), e.Level, e.Message)
+		_, _ = fmt.Fprintf(w, "[%s] %s %s\n", e.Timestamp.Format(time.RFC3339), e.Level, e.Message)
 	}
 }

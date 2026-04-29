@@ -89,7 +89,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("make raw: %v", err)
 		}
-		defer term.Restore(fd, oldState)
+		defer func() { _ = term.Restore(fd, oldState) }()
 	}
 
 	go pumpStdinToPty(ctx, sbx, pid)
@@ -98,7 +98,7 @@ func main() {
 
 	result, err := handle.Wait(ctx)
 	if oldState != nil {
-		term.Restore(fd, oldState)
+		_ = term.Restore(fd, oldState)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\r\nsession ended: %v\r\n", err)
