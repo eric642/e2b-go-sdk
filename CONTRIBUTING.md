@@ -35,7 +35,7 @@ CI runs these only on `push` to `main` / `master` or via
 ```sh
 make tools                                   # one-time install of buf, oapi-codegen, protoc-gen-*
 make regen                                   # sync newest upstream spec + regen internal/
-make regen E2B_TAG=python-sdk@2.20.0         # pin to a specific upstream release
+make regen E2B_TAG=e2b@2.19.0                # pin to a specific upstream release
 make version                                 # confirm what you're building against
 ```
 
@@ -44,11 +44,13 @@ generator config or spec files instead.
 
 ## Release & version policy
 
-This module tracks `e2b-dev/E2B` `python-sdk@X.Y.Z` tags 1:1. A release
-`vX.Y.Z` is always cut from upstream `python-sdk@X.Y.Z`, so
-`github.com/eric642/e2b-go-sdk@vX.Y.Z` and `e2b==X.Y.Z` on PyPI describe
-the same wire protocol. When you regen for a new upstream tag, update
-`CHANGELOG.md` and bump `VERSION`.
+Pre-1.0 releases (`v0.x`) are preview-tier: they pin an exact upstream
+commit and may contain breaking changes as we stabilise the Go surface.
+Starting at `v1.0.0` this module will track `e2b-dev/E2B` `e2b@X.Y.Z`
+tags 1:1, and a release `vX.Y.Z` will be cut from upstream `e2b@X.Y.Z`.
+Every regen should update `CHANGELOG.md`, `VERSION`, and the
+`UpstreamTag`/`UpstreamSemver`/`UpstreamCommit` constants in
+`internal/version/upstream.go` (managed by `scripts/sync-spec.sh`).
 
 ## Commit style
 

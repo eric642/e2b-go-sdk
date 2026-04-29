@@ -1,15 +1,21 @@
 # Changelog
 
 Releases of `github.com/eric642/e2b-go-sdk` mirror upstream
-[e2b-dev/E2B](https://github.com/e2b-dev/E2B) `python-sdk@X.Y.Z` tags 1:1.
-Each entry records both the Go SDK version and the upstream spec source.
+[e2b-dev/E2B](https://github.com/e2b-dev/E2B) `e2b@X.Y.Z` tags 1:1 once the
+first aligned release ships. Pre-alignment (v0.x) releases pin an exact
+upstream commit; each entry records both the Go SDK version and the
+upstream spec source.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Pinned to upstream `main` at commit
-`a6a1156a76753d5e9bbdd9eb7b26e84aa18b24d2` for initial development.
+## [0.1.0] — 2026-04-29
+
+Initial public preview. Pinned to upstream `main` at commit
+`a6a1156a76753d5e9bbdd9eb7b26e84aa18b24d2`. Subsequent v0.x releases may
+pin newer commits; the first v1.0 release will align to a real upstream
+`e2b@X.Y.Z` tag.
 
 ### Added
 
@@ -34,15 +40,17 @@ Pinned to upstream `main` at commit
 
 When cutting a release:
 
-1. `make sync-spec E2B_TAG=python-sdk@X.Y.Z` (or omit `E2B_TAG` to track
-   the newest `python-sdk@*` tag).
+1. `make sync-spec E2B_TAG=e2b@X.Y.Z` (or omit `E2B_TAG` to track the
+   newest `e2b@*` tag).
 2. `make codegen` — regenerate clients from the freshly copied specs.
 3. `go vet ./... && go test ./...` — verify nothing drifted.
-4. Update this `CHANGELOG.md` with an entry for `[X.Y.Z]` listing the
-   upstream changeset notes and any Go-specific fixes.
-5. `git add spec/ internal/ VERSION CHANGELOG.md && git commit -m "release vX.Y.Z"`.
-6. `git tag vX.Y.Z && git push origin main --tags`.
+4. `golangci-lint run` — lint must pass too.
+5. Update this `CHANGELOG.md` with an entry listing the upstream
+   changeset notes and any Go-specific fixes.
+6. `git add spec/ internal/ VERSION CHANGELOG.md && git commit -m "release vX.Y.Z"`.
+7. `git tag vX.Y.Z && git push origin main --tags`.
 
-The Go module tag (`vX.Y.Z`) matches the `python-sdk@X.Y.Z` tag it was
-generated from so consumers can pin `github.com/eric642/e2b-go-sdk@vX.Y.Z`
-and know exactly which upstream spec they are running against.
+Once aligned with upstream, the Go module tag (`vX.Y.Z`) matches the
+`e2b@X.Y.Z` tag it was generated from so consumers can pin
+`github.com/eric642/e2b-go-sdk@vX.Y.Z` and know exactly which upstream
+spec they are running against.

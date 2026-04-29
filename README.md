@@ -98,20 +98,19 @@ All generated code lives under `internal/` and is not part of the public API.
 
 ## Versioning & regenerating clients
 
-This SDK tracks upstream [`e2b-dev/E2B`](https://github.com/e2b-dev/E2B)
-`python-sdk@X.Y.Z` tags **1:1**. A release `vX.Y.Z` of this module is
-always generated from upstream `python-sdk@X.Y.Z` — so
-`github.com/eric642/e2b-go-sdk@vX.Y.Z` and the official
-`e2b==X.Y.Z` PyPI release describe the exact same wire protocol.
+This SDK will track upstream [`e2b-dev/E2B`](https://github.com/e2b-dev/E2B)
+`e2b@X.Y.Z` tags **1:1** once aligned. Pre-alignment (v0.x) releases pin
+an exact upstream commit instead; see `spec/E2B_VERSION` and
+`make version` for what any given build is compiled against.
 
 ```sh
 make tools                                   # one-time: install buf, oapi-codegen, protoc-gen-*
-make sync-spec E2B_TAG=python-sdk@2.20.0     # pin upstream spec (fetches tags)
+make sync-spec E2B_TAG=e2b@2.19.0            # pin upstream spec (fetches tags)
 make codegen                                 # regenerate internal/ clients
 
-# Convenience: sync + regen in one step. Defaults to the newest python-sdk tag.
+# Convenience: sync + regen in one step. Defaults to the newest e2b@* tag.
 make regen
-make regen E2B_TAG=python-sdk@2.20.0
+make regen E2B_TAG=e2b@2.19.0
 
 # Inspect what you're currently building against:
 make version
