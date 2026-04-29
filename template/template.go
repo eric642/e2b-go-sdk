@@ -72,7 +72,6 @@ type Builder struct {
 	contextDir     string
 	ignorePatterns []string
 	forceNextLayer bool
-	force          bool
 	err            error
 	registryConfig *apiclient.FromImageRegistry
 }

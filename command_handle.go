@@ -19,7 +19,6 @@ type CommandHandle struct {
 	sbx *Sandbox
 
 	pid uint32
-	tag string
 
 	stdoutCh chan []byte
 	stderrCh chan []byte
@@ -29,13 +28,12 @@ type CommandHandle struct {
 	onStderr func([]byte)
 
 	// protected by mu
-	mu       sync.Mutex
-	stdout   []byte
-	stderr   []byte
-	result   *CommandResult
-	doneErr  error
-	done     chan struct{}
-	streamCancel context.CancelFunc
+	mu        sync.Mutex
+	stdout    []byte
+	stderr    []byte
+	result    *CommandResult
+	doneErr   error
+	done      chan struct{}
 	streaming bool
 }
 
@@ -118,7 +116,6 @@ func (h *CommandHandle) SendStdin(ctx context.Context, data []byte) error {
 
 // startStream consumes the provided server stream in a goroutine and fans
 // events out to the channels. It stores the final CommandResult for Wait().
-// Caller must have ensured h.streamCancel captures the ctx cancel func.
 func (h *CommandHandle) startStream(stream eventStream) {
 	go func() {
 		defer close(h.stdoutCh)

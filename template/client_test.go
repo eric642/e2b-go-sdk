@@ -104,12 +104,13 @@ func asError(err error, dst **BuildError) bool {
 }
 
 func bytesReader(s string) io.Reader {
-	return stringReader{s}
+	return &stringReader{s: s}
 }
 
 type stringReader struct{ s string }
 
-func (r stringReader) Read(p []byte) (int, error) {
+// Pointer receiver is required so the slice advance sticks across Read calls.
+func (r *stringReader) Read(p []byte) (int, error) {
 	n := copy(p, r.s)
 	if n >= len(r.s) {
 		return n, io.EOF
