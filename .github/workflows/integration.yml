@@ -1,0 +1,25 @@
+name: integration
+
+# Integration tests hit the real E2B API and need E2B_API_KEY, which is
+# only exposed on trusted events. Forks' pull_request runs don't get
+# secrets, so scoping this to push events (+ manual dispatch) means the
+# job is simply not scheduled for those runs — the check shows up as
+# "skipped" in the UI instead of a success with every step short-circuited.
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+      - run: go test -run Integration -timeout 15m ./...
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
