@@ -191,7 +191,9 @@ func waitForDesktop(ctx context.Context, sbx *e2b.Sandbox, timeout time.Duration
 	}{
 		{"websockify-terminal", fmt.Sprintf("pgrep -f 'websockify.*%d' >/dev/null", terminalVNCPort)},
 		{"websockify-browser", fmt.Sprintf("pgrep -f 'websockify.*%d' >/dev/null", browserVNCPort)},
-		{"tmux-session", fmt.Sprintf("tmux -L %s has-session -t %s", tmuxSocket, tmuxSession)},
+		{"tmux-session", fmt.Sprintf(
+			"tmux -L %s has-session -t %s 2>/dev/null || sudo -n -u user tmux -L %s has-session -t %s",
+			tmuxSocket, tmuxSession, tmuxSocket, tmuxSession)},
 	}
 	var lastMissing string
 	for {
@@ -234,18 +236,22 @@ func collectDesktopDiagnostics(ctx context.Context, sbx *e2b.Sandbox) string {
 	diagCmd := strings.Join([]string{
 		`echo "--- whoami / id ---"`,
 		`whoami; id`,
+		`echo "--- start-desktop.sh present? ---"`,
+		`ls -la /usr/local/bin/start-desktop.sh 2>&1 || true`,
+		`echo "--- envd start_cmd (if exposed) ---"`,
+		`cat /etc/e2b/start_cmd 2>&1 || cat /.e2b/start_cmd 2>&1 || echo "(no start_cmd marker file)"`,
 		`echo "--- ps (Xvfb/x11vnc/websockify/tmux/fluxbox/xterm) ---"`,
 		`ps -eo pid,user,cmd | grep -E 'Xvfb|x11vnc|websockify|tmux|fluxbox|xterm|start-desktop' | grep -v grep || true`,
 		`echo "--- tmux sockets on disk ---"`,
 		`ls -la /tmp/tmux-* 2>&1 || true`,
 		`echo "--- tmux list-sessions (as current user) ---"`,
 		fmt.Sprintf(`tmux -L %s list-sessions 2>&1 || true`, tmuxSocket),
-		`echo "--- tmux list-sessions (root view) ---"`,
-		fmt.Sprintf(`sudo -n tmux -L %s list-sessions 2>&1 || true`, tmuxSocket),
-		`for f in /tmp/websockify.log /tmp/websockify.1.log /tmp/x11vnc.log /tmp/x11vnc.1.log /tmp/xterm.log /tmp/fluxbox.log /tmp/fluxbox.1.log /tmp/chromium.log; do`,
-		`  echo "--- $f ---"; tail -n 40 "$f" 2>&1 || true`,
-		`done`,
-	}, "; ")
+		`echo "--- tmux list-sessions (as user 1000) ---"`,
+		fmt.Sprintf(`sudo -n -u user tmux -L %s list-sessions 2>&1 || true`, tmuxSocket),
+		`echo "--- start-desktop log (if envd captured one) ---"`,
+		`tail -n 80 /tmp/start-desktop.log 2>&1 || true`,
+		`for f in /tmp/websockify.log /tmp/websockify.1.log /tmp/x11vnc.log /tmp/x11vnc.1.log /tmp/xterm.log /tmp/fluxbox.log /tmp/fluxbox.1.log /tmp/chromium.log; do echo "--- $f ---"; tail -n 40 "$f" 2>&1 || true; done`,
+	}, "\n")
 	h, err := sbx.Commands.Run(ctx, "sh", e2b.RunOptions{
 		Args:      []string{"-c", diagCmd},
 		TimeoutMs: 10_000,
@@ -427,7 +433,7 @@ func collectBrowserDiagnostics(ctx context.Context, sbx *e2b.Sandbox) string {
 		fmt.Sprintf(`tail -n 40 /tmp/x11vnc%s.log 2>&1 || true`, displayLogSuffix(browserDisplay)),
 		fmt.Sprintf(`echo "--- /tmp/fluxbox%s.log ---"`, displayLogSuffix(browserDisplay)),
 		fmt.Sprintf(`tail -n 40 /tmp/fluxbox%s.log 2>&1 || true`, displayLogSuffix(browserDisplay)),
-	}, "; ")
+	}, "\n")
 	h, err := sbx.Commands.Run(ctx, "sh", e2b.RunOptions{
 		Args:      []string{"-c", diag},
 		TimeoutMs: 10_000,
