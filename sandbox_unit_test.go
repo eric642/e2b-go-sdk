@@ -253,6 +253,22 @@ func TestSandboxConnectUsesDefaultTimeout(t *testing.T) {
 	}
 }
 
+func TestSandboxConnectAcceptsOKResponse(t *testing.T) {
+	mock := newRESTMock(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sandboxes/sbx-1/connect" {
+			t.Errorf("path: %s", r.URL.Path)
+		}
+		writeJSON(t, w, http.StatusOK, fakeSandboxResponse("sbx-1", "example.com", "", ""))
+	}))
+	sbx, err := Connect(context.Background(), "sbx-1", ConnectOptions{Config: mock.Config})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sbx.ID != "sbx-1" {
+		t.Fatalf("id: %q", sbx.ID)
+	}
+}
+
 func TestSandboxConnect404(t *testing.T) {
 	mock := newRESTMock(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)

@@ -140,10 +140,16 @@ func Connect(ctx context.Context, sandboxID string, opts ConnectOptions) (*Sandb
 	if err != nil {
 		return nil, newSandboxError("parse connect response", err)
 	}
-	if parsed.JSON201 == nil {
+	var connected *apiclient.Sandbox
+	if parsed.JSON201 != nil {
+		connected = parsed.JSON201
+	} else if parsed.JSON200 != nil {
+		connected = parsed.JSON200
+	}
+	if connected == nil {
 		return nil, newSandboxError("empty connect response body", nil)
 	}
-	return newSandbox(cfg, apiCli, hc, parsed.JSON201)
+	return newSandbox(cfg, apiCli, hc, connected)
 }
 
 // Kill terminates a sandbox by ID. Returns false (nil error) if the sandbox
