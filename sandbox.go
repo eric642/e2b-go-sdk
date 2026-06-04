@@ -83,100 +83,45 @@ type ConnectOptions struct {
 // Create provisions a new sandbox and returns a *Sandbox wired up with all
 // sub-clients. The caller owns the returned sandbox and should call Kill
 // (directly or via defer) to release it.
+//
+// Deprecated: prefer NewClient(cfg).Create, which reuses one control-plane
+// REST client across calls. This helper builds a throwaway Client from
+// opts.Config on every call.
 func Create(ctx context.Context, opts CreateOptions) (*Sandbox, error) {
-	cfg := opts.Config.resolve()
-	hc := cfg.httpClient()
-	auth := transport.Auth{APIKey: cfg.APIKey, AccessToken: cfg.AccessToken, Headers: cfg.Headers}
-	apiCli, err := transport.NewAPIClient(cfg.APIURL, hc, auth)
+	c, err := NewClient(opts.Config)
 	if err != nil {
-		return nil, newSandboxError("init api client", err)
-	}
-
-	body := buildNewSandbox(opts)
-	resp, err := apiCli.PostSandboxes(ctx, body)
-	if err != nil {
-		return nil, mapHTTPOrCtx(err)
-	}
-	defer resp.Body.Close()
-	if err := mapHTTPErr(resp, ""); err != nil {
 		return nil, err
 	}
-	parsed, err := apiclient.ParsePostSandboxesResponse(resp)
-	if err != nil {
-		return nil, newSandboxError("parse create response", err)
-	}
-	created := parsed.JSON201
-	if created == nil {
-		return nil, newSandboxError("empty create response body", nil)
-	}
-	return newSandbox(cfg, apiCli, hc, created)
+	return c.Create(ctx, opts)
 }
 
 // Connect attaches to an existing sandbox (running or paused). If paused, the
 // server resumes it; the call sets the sandbox timeout to opts.Timeout
 // (default 5 minutes).
+//
+// Deprecated: prefer NewClient(cfg).Connect (see Create).
 func Connect(ctx context.Context, sandboxID string, opts ConnectOptions) (*Sandbox, error) {
-	cfg := opts.Config.resolve()
-	hc := cfg.httpClient()
-	auth := transport.Auth{APIKey: cfg.APIKey, AccessToken: cfg.AccessToken, Headers: cfg.Headers}
-	apiCli, err := transport.NewAPIClient(cfg.APIURL, hc, auth)
+	c, err := NewClient(opts.Config)
 	if err != nil {
-		return nil, newSandboxError("init api client", err)
-	}
-	timeout := opts.Timeout
-	if timeout <= 0 {
-		timeout = DefaultSandboxTimeout
-	}
-	body := apiclient.ConnectSandbox{Timeout: int32(timeout / time.Second)}
-	resp, err := apiCli.PostSandboxesSandboxIDConnect(ctx, sandboxID, body)
-	if err != nil {
-		return nil, mapHTTPOrCtx(err)
-	}
-	defer resp.Body.Close()
-	if err := mapHTTPErr(resp, sandboxID); err != nil {
 		return nil, err
 	}
-	parsed, err := apiclient.ParsePostSandboxesSandboxIDConnectResponse(resp)
-	if err != nil {
-		return nil, newSandboxError("parse connect response", err)
-	}
-	var connected *apiclient.Sandbox
-	if parsed.JSON201 != nil {
-		connected = parsed.JSON201
-	} else if parsed.JSON200 != nil {
-		connected = parsed.JSON200
-	}
-	if connected == nil {
-		return nil, newSandboxError("empty connect response body", nil)
-	}
-	return newSandbox(cfg, apiCli, hc, connected)
+	return c.Connect(ctx, sandboxID, opts)
 }
 
 // Kill terminates a sandbox by ID. Returns false (nil error) if the sandbox
 // was already gone.
+//
+// Deprecated: prefer NewClient(cfg).Kill (see Create).
 func Kill(ctx context.Context, sandboxID string, opts ConnectOptions) (bool, error) {
-	cfg := opts.Config.resolve()
-	hc := cfg.httpClient()
-	if cfg.Debug {
+	// Preserve the historical behaviour: in Debug mode never touch the network.
+	if opts.Config.resolve().Debug {
 		return true, nil
 	}
-	auth := transport.Auth{APIKey: cfg.APIKey, AccessToken: cfg.AccessToken, Headers: cfg.Headers}
-	apiCli, err := transport.NewAPIClient(cfg.APIURL, hc, auth)
+	c, err := NewClient(opts.Config)
 	if err != nil {
-		return false, newSandboxError("init api client", err)
-	}
-	resp, err := apiCli.DeleteSandboxesSandboxID(ctx, sandboxID)
-	if err != nil {
-		return false, mapHTTPOrCtx(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return false, nil
-	}
-	if err := mapHTTPErr(resp, sandboxID); err != nil {
 		return false, err
 	}
-	return true, nil
+	return c.Kill(ctx, sandboxID)
 }
 
 // Kill terminates this sandbox.
@@ -331,21 +276,23 @@ func (s *Sandbox) DownloadURL(path string, opts SignatureOptions) (string, error
 	return s.buildFileURL(path, SignatureRead, opts, false)
 }
 
-// newSandbox builds the per-sandbox sub-clients from a freshly parsed
-// REST response.
-func newSandbox(cfg Config, apiCli *apiclient.Client, hc *http.Client, created *apiclient.Sandbox) (*Sandbox, error) {
+// newSandbox builds the per-sandbox sub-clients from a freshly parsed REST
+// response, reusing the Client's shared HTTP and control-plane REST clients.
+// The envd Connect-RPC/HTTP clients are still built per sandbox (their base
+// URL and access token are sandbox-specific) but share the Client's *http.Client.
+func (c *Client) newSandbox(created *apiclient.Sandbox) (*Sandbox, error) {
 	sbx := &Sandbox{
 		ID:          created.SandboxID,
 		EnvdVersion: created.EnvdVersion,
-		cfg:         cfg,
-		apiCli:      apiCli,
-		httpCli:     hc,
+		cfg:         c.cfg,
+		apiCli:      c.apiCli,
+		httpCli:     c.httpCli,
 	}
 	if created.Domain != nil {
 		sbx.Domain = *created.Domain
 	}
 	if sbx.Domain == "" {
-		sbx.Domain = cfg.Domain
+		sbx.Domain = c.cfg.Domain
 	}
 	if created.EnvdAccessToken != nil {
 		sbx.EnvdAccessToken = *created.EnvdAccessToken
@@ -354,13 +301,13 @@ func newSandbox(cfg Config, apiCli *apiclient.Client, hc *http.Client, created *
 		sbx.TrafficAccessToken = *created.TrafficAccessToken
 	}
 
-	envdBase := cfg.sandboxURL(sbx.ID, sbx.Domain)
+	envdBase := c.cfg.sandboxURL(sbx.ID, sbx.Domain)
 	envdAuth := transport.EnvdAuth{
 		Token:   sbx.EnvdAccessToken,
 		User:    defaultUser,
-		Headers: mergeHeaders(cfg.Headers, cfg.ExtraSandboxHeaders),
+		Headers: mergeHeaders(c.cfg.Headers, c.cfg.ExtraSandboxHeaders),
 	}
-	envd, err := transport.NewEnvdClients(envdBase, hc, envdAuth)
+	envd, err := transport.NewEnvdClients(envdBase, c.httpCli, envdAuth)
 	if err != nil {
 		return nil, newSandboxError("init envd client", err)
 	}

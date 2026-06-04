@@ -61,6 +61,50 @@ func main() {
 }
 ```
 
+## Unified client
+
+When you create or manage more than a couple of sandboxes, hold a single
+`e2b.Client`. It resolves the config once and shares one HTTP client and one
+control-plane REST client across every call and every sandbox it creates:
+
+```go
+c, err := e2b.NewClient(e2b.Config{}) // reads credentials from the env
+if err != nil {
+	log.Fatal(err)
+}
+
+sbx, err := c.Create(ctx, e2b.CreateOptions{Template: "base"})
+if err != nil {
+	log.Fatal(err)
+}
+defer sbx.Kill(ctx)
+
+// List all running sandboxes (paginated under the hood).
+running, err := c.ListAll(ctx, e2b.SandboxListOptions{
+	State: []e2b.SandboxState{e2b.SandboxStateRunning},
+})
+if err != nil {
+	log.Fatal(err)
+}
+for _, s := range running {
+	fmt.Println(s.SandboxID, s.State)
+}
+
+// Or page manually:
+p := c.List(ctx, e2b.SandboxListOptions{})
+for p.HasNext() {
+	page, err := p.NextItems(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// ... use page ...
+}
+```
+
+The package-level `e2b.Create` / `Connect` / `Kill` / `List` / `ListAll`
+functions still work; they build a throwaway `Client` per call and are kept for
+compatibility. Prefer `NewClient` to reuse the REST client across calls.
+
 ## Authentication
 
 The SDK reads credentials from the environment:
@@ -176,7 +220,7 @@ CI is split across two workflows:
 
 v1 implements the core sandbox surface:
 
-- [x] `Create`, `Connect`, `Kill`, `Pause`, `CreateSnapshot`, `GetInfo`, `GetMetrics`, `SetTimeout`
+- [x] `Create`, `Connect`, `Kill`, `List` / `ListAll`, `Pause`, `CreateSnapshot`, `GetInfo`, `GetMetrics`, `SetTimeout`
 - [x] `Commands.Run` / `Start` / `Connect` / `List` / `Kill` / `SendStdin` / `CloseStdin`
 - [x] `Pty.Create` / `Resize` / `SendInput` / `Kill`
 - [x] `Filesystem` `Read` / `Write` / `List` / `Stat` / `Move` / `Remove` / `MakeDir` / `Watch`

@@ -109,8 +109,11 @@ func main() {
 	// 2) Launch a sandbox and tear it down on exit. RequestTimeoutDisabled on
 	//    Config prevents the default 60s HTTP client from cutting the PTY
 	//    stream short.
-	sbx, err := e2b.Create(ctx, e2b.CreateOptions{
-		Config:   e2b.Config{RequestTimeoutDisabled: true},
+	client, err := e2b.NewClient(e2b.Config{RequestTimeoutDisabled: true})
+	if err != nil {
+		log.Fatalf("client: %v", err)
+	}
+	sbx, err := client.Create(ctx, e2b.CreateOptions{
 		Template: templateID,
 		Timeout:  15 * time.Minute,
 		Secure:   true,
