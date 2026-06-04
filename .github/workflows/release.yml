@@ -1,0 +1,48 @@
+name: release
+
+# Cutting a release is just pushing a tag (see CHANGELOG.md "Release
+# workflow"):
+#   git tag v0.2.0 && git push origin main --tags
+# This workflow verifies the tagged commit still builds, then publishes a
+# GitHub Release whose body lists every change since the previous v* tag
+# plus a compare link.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write  # required to create the GitHub Release
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history + tags so release-notes.sh can find the previous tag
+          # and diff against it.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+
+      # Gate: never publish a release from a tag that doesn't build/pass.
+      - run: go vet ./...
+      - run: go test -race ./...
+
+      - name: Generate release notes
+        run: bash scripts/release-notes.sh "$GITHUB_REF_NAME" > release-notes.md
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            --verify-tag

@@ -59,6 +59,12 @@ When cutting a release:
 6. `git add spec/ internal/ VERSION CHANGELOG.md && git commit -m "release vX.Y.Z"`.
 7. `git tag vX.Y.Z && git push origin main --tags`.
 
+Pushing the `vX.Y.Z` tag triggers `.github/workflows/release.yml`, which
+re-runs `go vet`/`go test -race` against the tagged commit and then
+publishes a GitHub Release. Its notes list every non-merge commit since the
+previous `v*` tag plus a `compare/<prev>...<new>` link. Preview the body
+locally before tagging with `bash scripts/release-notes.sh vX.Y.Z`.
+
 Once aligned with upstream, the Go module tag (`vX.Y.Z`) matches the
 `e2b@X.Y.Z` tag it was generated from so consumers can pin
 `github.com/eric642/e2b-go-sdk@vX.Y.Z` and know exactly which upstream
