@@ -42,8 +42,12 @@ func main() {
 
 	ctx := context.Background()
 
-	sbx, err := e2b.Create(ctx, e2b.CreateOptions{
-		Config:   cfg,
+	client, err := e2b.NewClient(cfg)
+	if err != nil {
+		log.Fatalf("client: %v", err)
+	}
+
+	sbx, err := client.Create(ctx, e2b.CreateOptions{
 		Template: envOr("E2B_TEMPLATE", "base"),
 		Timeout:  30 * time.Minute,
 		Metadata: map[string]string{"example": "terminal"},

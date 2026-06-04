@@ -20,7 +20,12 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	sbx, err := e2b.Create(ctx, e2b.CreateOptions{
+	client, err := e2b.NewClient(e2b.Config{})
+	if err != nil {
+		log.Fatalf("client: %v", err)
+	}
+
+	sbx, err := client.Create(ctx, e2b.CreateOptions{
 		Template: envOr("E2B_TEMPLATE", "base"),
 		Timeout:  5 * time.Minute,
 	})

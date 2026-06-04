@@ -169,4 +169,34 @@ func sandboxInfoFromAPI(d *apiclient.SandboxDetail) *SandboxInfo {
 	return info
 }
 
+// sandboxInfoFromListed converts a ListedSandbox (returned by the list
+// endpoint) into the public type. ListedSandbox carries fewer fields than
+// SandboxDetail, so Domain, EnvdAccessToken, AllowInternetAccess, Network and
+// Lifecycle are left zero — call GetInfo for the full record.
+func sandboxInfoFromListed(d *apiclient.ListedSandbox) *SandboxInfo {
+	info := &SandboxInfo{
+		SandboxID:   d.SandboxID,
+		TemplateID:  d.TemplateID,
+		State:       SandboxState(d.State),
+		CPUCount:    int32(d.CpuCount),
+		MemoryMB:    int32(d.MemoryMB),
+		DiskSizeMB:  int32(d.DiskSizeMB),
+		StartedAt:   d.StartedAt,
+		EndAt:       d.EndAt,
+		EnvdVersion: d.EnvdVersion,
+	}
+	if d.Alias != nil {
+		info.Alias = *d.Alias
+	}
+	if d.Metadata != nil {
+		info.Metadata = map[string]string(*d.Metadata)
+	}
+	if d.VolumeMounts != nil {
+		for _, m := range *d.VolumeMounts {
+			info.VolumeMounts = append(info.VolumeMounts, VolumeMount{Name: m.Name, Path: m.Path})
+		}
+	}
+	return info
+}
+
 func urlEscape(s string) string { return url.QueryEscape(s) }

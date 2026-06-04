@@ -54,7 +54,11 @@ func main() {
 	}
 	fmt.Printf("template built: %s\n", info.TemplateID)
 
-	sbx, err := e2b.Create(ctx, e2b.CreateOptions{Template: info.TemplateID})
+	client, err := e2b.NewClient(e2b.Config{})
+	if err != nil {
+		log.Fatalf("client: %v", err)
+	}
+	sbx, err := client.Create(ctx, e2b.CreateOptions{Template: info.TemplateID})
 	if err != nil {
 		log.Fatalf("create sandbox: %v", err)
 	}

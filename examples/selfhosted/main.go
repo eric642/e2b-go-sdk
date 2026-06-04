@@ -38,8 +38,12 @@ func main() {
 		log.Fatal("E2B_API_KEY is required")
 	}
 
-	sbx, err := e2b.Create(ctx, e2b.CreateOptions{
-		Config:   cfg,
+	client, err := e2b.NewClient(cfg)
+	if err != nil {
+		log.Fatalf("client: %v", err)
+	}
+
+	sbx, err := client.Create(ctx, e2b.CreateOptions{
 		Template: envOr("E2B_TEMPLATE", "base"),
 		Timeout:  5 * time.Minute,
 		Metadata: map[string]string{"example": "selfhosted"},

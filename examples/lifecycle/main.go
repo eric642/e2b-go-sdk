@@ -94,7 +94,11 @@ func main() {
 	}
 
 	// 4) Start a sandbox from the template.
-	sbx, err := e2b.Create(ctx, e2b.CreateOptions{
+	client, err := e2b.NewClient(e2b.Config{})
+	if err != nil {
+		log.Fatalf("client: %v", err)
+	}
+	sbx, err := client.Create(ctx, e2b.CreateOptions{
 		Template: info.TemplateID,
 		Timeout:  5 * time.Minute,
 	})

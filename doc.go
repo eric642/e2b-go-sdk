@@ -34,6 +34,26 @@
 //
 // Pass an explicit Config to override.
 //
+// # Unified client
+//
+// For programs that create or manage many sandboxes, build one Client and
+// reuse it. It resolves the Config once and shares a single HTTP and
+// control-plane REST client across every call and every Sandbox it creates:
+//
+//	c, err := e2b.NewClient(e2b.Config{}) // reads credentials from the env
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	sbx, err := c.Create(ctx, e2b.CreateOptions{Template: "base"})
+//	// ...
+//	running, err := c.ListAll(ctx, e2b.SandboxListOptions{
+//		State: []e2b.SandboxState{e2b.SandboxStateRunning},
+//	})
+//
+// The package-level Create, Connect, Kill, List and ListAll functions are thin
+// convenience wrappers that build a throwaway Client per call; they are kept
+// for compatibility but NewClient is preferred.
+//
 // # Sub-packages
 //
 //   - template: fluent builder for sandbox templates (serialization only in v1)
