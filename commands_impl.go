@@ -2,6 +2,7 @@ package e2b
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"time"
 
@@ -135,7 +136,15 @@ func (c *Commands) SendStdin(ctx context.Context, pid uint32, data []byte) error
 }
 
 // CloseStdin closes the stdin side of the process.
+//
+// Closing stdin requires envd >= 0.5.2; on an older build this returns an error
+// up front instead of failing opaquely at the RPC layer.
 func (c *Commands) CloseStdin(ctx context.Context, pid uint32) error {
+	if compareEnvdVersions(c.sbx.envdVersionForGating(), envdEnvdClose) < 0 {
+		return &TemplateError{Message: fmt.Sprintf(
+			"closing stdin requires envd >= %s, but this sandbox runs %s; rebuild the template to use it",
+			envdEnvdClose, c.sbx.EnvdVersion)}
+	}
 	req := connect.NewRequest(&procpb.CloseStdinRequest{
 		Process: &procpb.ProcessSelector{Selector: &procpb.ProcessSelector_Pid{Pid: pid}},
 	})

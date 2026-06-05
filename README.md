@@ -220,16 +220,45 @@ CI is split across two workflows:
 
 v1 implements the core sandbox surface:
 
-- [x] `Create`, `Connect`, `Kill`, `List` / `ListAll`, `Pause`, `CreateSnapshot`, `GetInfo`, `GetMetrics`, `SetTimeout`
+- [x] `Create`, `Connect`, `Kill`, `List` / `ListAll`, `Pause`, `SetTimeout`, `GetInfo`, `IsRunning`
+- [x] `GetMetrics` (optional `MetricsOptions{Start, End}` time window)
+- [x] Snapshots: `CreateSnapshot`, `ListSnapshots` / `ListAllSnapshots`, `DeleteSnapshot`
+- [x] MCP: `GetMcpURL` / `GetMcpToken`, `GetHost`, `UploadURL` / `DownloadURL`
 - [x] `Commands.Run` / `Start` / `Connect` / `List` / `Kill` / `SendStdin` / `CloseStdin`
 - [x] `Pty.Create` / `Resize` / `SendInput` / `Kill`
-- [x] `Filesystem` `Read` / `Write` / `List` / `Stat` / `Move` / `Remove` / `MakeDir` / `Watch`
+- [x] `Filesystem` `Read` / `Write` / `WriteFiles` / `List` (with `Depth`) / `Stat` / `Move` / `Remove` / `MakeDir` / `Watch`
 - [x] `Git` Clone / Add / Commit / Push / Pull / Status / Branches / …
 - [x] `Volume` Create / Connect / List / ReadFile / WriteFile / Remove / MakeDir / Delete
 - [x] `template.Builder` serialization, server-side build orchestration
       (v3 `Build` / `BuildStream` / `BuildInBackground`), and legacy v2
       counterparts (`BuildV2` / `BuildStreamV2` / `BuildInBackgroundV2`)
 - [x] `template.Client.List` / `Get` / `Delete` / `SetPublic` / `GetBuildLogs`
+
+### API versioning
+
+The SDK distinguishes interface versions on two axes:
+
+- **Control plane.** It calls the current endpoint for each operation:
+  sandbox listing uses **v2** (`GET /v2/sandboxes`, cursor pagination via the
+  `x-next-token` header); template builds use **v3** with legacy **v2**
+  counterparts; `Connect` resumes a paused sandbox (no separate `Resume`).
+- **envd (in-sandbox).** Behaviour is gated on the sandbox's `EnvdVersion` to
+  stay compatible with older templates, mirroring the JS/Python SDKs:
+  - file uploads use `application/octet-stream` on envd **≥ 0.5.7** and fall
+    back to `multipart/form-data` below it;
+  - the username/`Authorization` header is omitted on envd **≥ 0.4.0** (the
+    server infers the default user) and injected below it;
+  - recursive `Filesystem.Watch` requires envd **≥ 0.1.4** and
+    `Commands.CloseStdin` requires **≥ 0.5.2** — both fail fast with a clear
+    error on older builds rather than an opaque RPC failure.
+
+  `Filesystem.Watch` uses the streaming `WatchDir` RPC; the non-streaming
+  watcher RPCs (`CreateWatcher` / `GetWatcherEvents` / `RemoveWatcher`) are
+  intentionally not exposed.
+
+Not yet wrapped (available in the generated client under `internal/api`, and
+also unexposed by the reference SDKs): sandbox logs, batch / team metrics,
+filesystem gzip, and `Refresh`.
 
 ## License
 
