@@ -35,9 +35,9 @@ func TestAuthExtraHeadersDoNotOverwrite(t *testing.T) {
 	auth := Auth{
 		APIKey: "k",
 		Headers: map[string]string{
-			"User-Agent":      "e2b-go/x",
-			"X-Custom":        "yes",
-			"Authorization":   "should not overwrite",
+			"User-Agent":    "e2b-go/x",
+			"X-Custom":      "yes",
+			"Authorization": "should not overwrite",
 		},
 	}
 	req, _ := http.NewRequest(http.MethodGet, "https://example.com", nil)
@@ -56,16 +56,19 @@ func TestAuthExtraHeadersDoNotOverwrite(t *testing.T) {
 	}
 }
 
-func TestEnvdAuthDefaultUser(t *testing.T) {
+func TestEnvdAuthOmitsAuthorizationWhenNoUser(t *testing.T) {
+	// The version-gating decision now lives in the e2b package: it leaves User
+	// empty for envd >= 0.4.0 so the server infers the default user. An empty
+	// User therefore means "set X-Access-Token but omit the Authorization
+	// header", matching the upstream authenticationHeader behaviour.
 	a := EnvdAuth{Token: "envd-tok"}
 	h := http.Header{}
 	a.applyHeader(h)
 	if h.Get("X-Access-Token") != "envd-tok" {
 		t.Fatalf("X-Access-Token=%q", h.Get("X-Access-Token"))
 	}
-	// Default user "user" → Basic base64("user:") == "dXNlcjo="
-	if h.Get("Authorization") != "Basic dXNlcjo=" {
-		t.Fatalf("Authorization=%q", h.Get("Authorization"))
+	if got := h.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization should be omitted when User is empty, got %q", got)
 	}
 }
 
@@ -76,6 +79,24 @@ func TestEnvdAuthExplicitUser(t *testing.T) {
 	// base64("root:") == "cm9vdDo="
 	if h.Get("Authorization") != "Basic cm9vdDo=" {
 		t.Fatalf("Authorization=%q", h.Get("Authorization"))
+	}
+}
+
+func TestEnvdAuthExtraHeadersCannotInjectAuthorization(t *testing.T) {
+	// On the inferred-user path (User empty, e.g. envd >= 0.4.0) extra headers
+	// must not be able to set Authorization: that would defeat default-user
+	// inference and could forward a control-plane bearer to the sandbox.
+	a := EnvdAuth{
+		Token:   "t",
+		Headers: map[string]string{"Authorization": "Bearer leak", "X-Custom": "c"},
+	}
+	h := http.Header{}
+	a.applyHeader(h)
+	if got := h.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization must stay omitted on no-user path, got %q", got)
+	}
+	if h.Get("X-Custom") != "c" {
+		t.Fatalf("non-reserved extra header should still apply: %q", h.Get("X-Custom"))
 	}
 }
 

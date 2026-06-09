@@ -36,6 +36,15 @@ type SandboxInfo struct {
 	VolumeMounts        []VolumeMount
 }
 
+// MetricsOptions filters Sandbox.GetMetrics to a time window. Both bounds are
+// optional; a zero time means "unbounded on that side".
+type MetricsOptions struct {
+	// Start, if non-zero, returns only samples at or after this time.
+	Start time.Time
+	// End, if non-zero, returns only samples at or before this time.
+	End time.Time
+}
+
 // SandboxMetric is one sample of resource usage.
 type SandboxMetric struct {
 	CPUCount      int32
@@ -110,6 +119,14 @@ type WriteInfo struct {
 	Path string
 	Name string
 	Type EntryType
+}
+
+// WriteEntry is one file to write via Filesystem.WriteFiles.
+type WriteEntry struct {
+	// Path is the destination path inside the sandbox.
+	Path string
+	// Data is the file content.
+	Data []byte
 }
 
 // sandboxInfoFromAPI converts the generated type into the public type.

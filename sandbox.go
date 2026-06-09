@@ -3,6 +3,7 @@ package e2b
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	apiclient "github.com/eric642/e2b-go-sdk/internal/api"
@@ -225,12 +226,27 @@ func (s *Sandbox) GetInfo(ctx context.Context) (*SandboxInfo, error) {
 	return sandboxInfoFromAPI(d), nil
 }
 
-// GetMetrics fetches instantaneous CPU/memory/disk usage.
-func (s *Sandbox) GetMetrics(ctx context.Context) ([]SandboxMetric, error) {
+// GetMetrics fetches CPU/memory/disk usage samples for the sandbox. With no
+// opts it returns the most recent samples; pass a single MetricsOptions to
+// bound the time window (opts.Start / opts.End).
+func (s *Sandbox) GetMetrics(ctx context.Context, opts ...MetricsOptions) ([]SandboxMetric, error) {
 	if s.cfg.Debug {
 		return nil, nil
 	}
-	resp, err := s.apiCli.GetSandboxesSandboxIDMetrics(ctx, s.ID, nil)
+	var params *apiclient.GetSandboxesSandboxIDMetricsParams
+	if len(opts) > 0 {
+		o := opts[0]
+		params = &apiclient.GetSandboxesSandboxIDMetricsParams{}
+		if !o.Start.IsZero() {
+			start := o.Start.Unix()
+			params.Start = &start
+		}
+		if !o.End.IsZero() {
+			end := o.End.Unix()
+			params.End = &end
+		}
+	}
+	resp, err := s.apiCli.GetSandboxesSandboxIDMetrics(ctx, s.ID, params)
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
@@ -264,6 +280,38 @@ func (s *Sandbox) GetMetrics(ctx context.Context) ([]SandboxMetric, error) {
 // GetHost returns the external hostname for the given sandbox port.
 func (s *Sandbox) GetHost(port int) string {
 	return s.cfg.sandboxHost(s.ID, s.Domain, port)
+}
+
+// MCPPort is the in-sandbox port the MCP gateway listens on.
+const MCPPort = 50005
+
+// mcpTokenPath is where the MCP gateway writes its access token inside the sandbox.
+const mcpTokenPath = "/etc/mcp-gateway/.token"
+
+// GetMcpURL returns the sandbox's MCP gateway URL (https://<host>/mcp). It does
+// not verify that an MCP gateway is actually running; create the sandbox with
+// CreateOptions.Mcp to enable one.
+func (s *Sandbox) GetMcpURL() string {
+	scheme := "https"
+	if s.cfg.Debug {
+		scheme = "http"
+	}
+	return scheme + "://" + s.GetHost(MCPPort) + "/mcp"
+}
+
+// GetMcpToken reads the MCP gateway access token from inside the sandbox
+// (/etc/mcp-gateway/.token). It returns a FileNotFoundError if no MCP gateway
+// is configured.
+//
+// The token file is owned by root, so the read is performed as root (matching
+// the reference SDKs); reading it as the default user fails with a permission
+// or not-found error even when the gateway is configured.
+func (s *Sandbox) GetMcpToken(ctx context.Context) (string, error) {
+	data, err := s.Files.Read(ctx, mcpTokenPath, FsOptions{User: "root"})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
 // UploadURL returns an HTTP URL the caller can POST a file to.
@@ -302,9 +350,11 @@ func (c *Client) newSandbox(created *apiclient.Sandbox) (*Sandbox, error) {
 	}
 
 	envdBase := c.cfg.sandboxURL(sbx.ID, sbx.Domain)
+	// envd >= 0.4.0 infers the default user server-side, so leave User empty
+	// (no Authorization header); older envd needs the fallback user injected.
 	envdAuth := transport.EnvdAuth{
 		Token:   sbx.EnvdAccessToken,
-		User:    defaultUser,
+		User:    resolveEnvdUser(sbx.envdVersionForGating(), ""),
 		Headers: mergeHeaders(c.cfg.Headers, c.cfg.ExtraSandboxHeaders),
 	}
 	envd, err := transport.NewEnvdClients(envdBase, c.httpCli, envdAuth)
@@ -389,16 +439,21 @@ func mapHTTPOrCtx(err error) error {
 
 // buildFileURL constructs the envd /files URL for upload/download, optionally
 // appending a v1 signature. upload is true when the URL is for POST.
+//
+// The username query parameter is gated on the envd version (see
+// resolveEnvdUser): for envd >= 0.4.0 with no explicit user it is omitted so
+// envd infers the default user, matching the upstream JS/Python SDKs. The same
+// resolved user feeds the signature hash (empty string for the inferred user),
+// which keeps signatures byte-for-byte compatible with the reference SDKs.
 func (s *Sandbox) buildFileURL(path string, op SignatureOperation, opts SignatureOptions, _ bool) (string, error) {
 	base := s.cfg.sandboxURL(s.ID, s.Domain)
 	u := base + "/files?path=" + urlEscape(path)
-	user := opts.User
-	if user == "" {
-		user = defaultUser
+	user := resolveEnvdUser(s.envdVersionForGating(), opts.User)
+	if user != "" {
+		u += "&username=" + urlEscape(user)
 	}
-	u += "&username=" + urlEscape(user)
 	if s.EnvdAccessToken != "" {
-		sig, err := GetSignature(path, op, s.EnvdAccessToken, SignatureOptions{User: opts.User, ExpirationInSeconds: opts.ExpirationInSeconds})
+		sig, err := GetSignature(path, op, s.EnvdAccessToken, SignatureOptions{User: user, ExpirationInSeconds: opts.ExpirationInSeconds})
 		if err != nil {
 			return "", err
 		}

@@ -3,7 +3,10 @@ package e2b
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 
 	"connectrpc.com/connect"
@@ -13,8 +16,11 @@ import (
 
 // FsOptions holds per-call tweaks common across filesystem operations.
 type FsOptions struct {
-	User              string
-	RequestTimeoutMs  int
+	User             string
+	RequestTimeoutMs int
+	// Depth limits how many directory levels Filesystem.List descends. 0 means
+	// the default of 1 (immediate children only). Ignored by other operations.
+	Depth int
 }
 
 // Stat fetches metadata for path.
@@ -47,9 +53,17 @@ func (f *Filesystem) IsDir(ctx context.Context, path string, opts FsOptions) (bo
 	return info.Type == EntryTypeDirectory, nil
 }
 
-// List returns the entries of a directory.
+// List returns the entries of a directory. opts.Depth controls how many
+// directory levels to descend; 0 means the default (1, immediate children).
+// A negative depth is rejected, matching the reference SDKs' depth>=1 rule.
 func (f *Filesystem) List(ctx context.Context, path string, opts FsOptions) ([]EntryInfo, error) {
-	resp, err := f.sbx.envd.Filesystem.ListDir(ctx, connect.NewRequest(&fspb.ListDirRequest{Path: path, Depth: 1}))
+	depth := opts.Depth
+	if depth == 0 {
+		depth = 1
+	} else if depth < 1 {
+		return nil, &InvalidArgumentError{Message: "depth should be at least 1"}
+	}
+	resp, err := f.sbx.envd.Filesystem.ListDir(ctx, connect.NewRequest(&fspb.ListDirRequest{Path: path, Depth: uint32(depth)}))
 	if err != nil {
 		return nil, mapConnectErr(err)
 	}
@@ -108,35 +122,96 @@ func (f *Filesystem) ReadStream(ctx context.Context, path string, opts FsOptions
 	}
 	if resp.StatusCode >= 300 {
 		defer resp.Body.Close()
-		return nil, mapHTTPErr(resp, "")
+		return nil, mapEnvdFileErr(resp, path)
 	}
 	return resp.Body, nil
 }
 
 // Write creates or overwrites a file with the contents of r. Returns the
 // final EntryInfo of the written file.
+//
+// The upload encoding is gated on the envd version: envd >= 0.5.7 accepts a
+// raw application/octet-stream body, while older envd requires
+// multipart/form-data. See uploadOne.
 func (f *Filesystem) Write(ctx context.Context, path string, r io.Reader, opts FsOptions) (*WriteInfo, error) {
+	return f.uploadOne(ctx, path, r, opts)
+}
+
+// uploadOne POSTs a single file to envd's /files endpoint, choosing the body
+// encoding based on the envd version (see envdOctetStreamUpload). It is shared
+// by Write and WriteFiles.
+func (f *Filesystem) uploadOne(ctx context.Context, path string, r io.Reader, opts FsOptions) (*WriteInfo, error) {
 	u, err := f.sbx.buildFileURL(path, SignatureWrite, SignatureOptions{User: opts.User}, true)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, r)
+
+	body := r
+	contentType := "application/octet-stream"
+	if compareEnvdVersions(f.sbx.envdVersionForGating(), envdOctetStreamUpload) < 0 {
+		// Pre-0.5.7 envd expects multipart/form-data with the file in a "file"
+		// field whose filename carries the destination path. Stream the body
+		// through an io.Pipe so memory stays bounded and a cancelled context is
+		// observed promptly (the transport closes the reader, which surfaces as
+		// a write error to the goroutine).
+		pr, pw := io.Pipe()
+		mw := multipart.NewWriter(pw)
+		contentType = mw.FormDataContentType()
+		go func() {
+			part, err := mw.CreateFormFile("file", path)
+			if err != nil {
+				_ = pw.CloseWithError(err)
+				return
+			}
+			if _, err := io.Copy(part, r); err != nil {
+				_ = pw.CloseWithError(err)
+				return
+			}
+			// mw.Close writes the trailing boundary; CloseWithError(nil) closes
+			// the pipe cleanly so the reader sees io.EOF.
+			_ = pw.CloseWithError(mw.Close())
+		}()
+		body = pr
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, body)
 	if err != nil {
 		return nil, newSandboxError("build file request", err)
 	}
 	if f.sbx.EnvdAccessToken != "" {
 		req.Header.Set("X-Access-Token", f.sbx.EnvdAccessToken)
 	}
-	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Content-Type", contentType)
 	resp, err := f.sbx.httpCli.Do(req)
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return nil, mapHTTPErr(resp, "")
+		return nil, mapEnvdFileErr(resp, path)
 	}
-	return &WriteInfo{Path: path}, nil
+	// envd returns the written entry/entries as a JSON array (UploadSuccess).
+	// Populate Name/Type from it so callers see real metadata; fall back to the
+	// requested path if the body is empty or unparseable.
+	info := &WriteInfo{Path: path}
+	var entries []struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+		Type string `json:"type"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err == nil && len(entries) > 0 {
+		e := entries[0]
+		if e.Path != "" {
+			info.Path = e.Path
+		}
+		info.Name = e.Name
+		if e.Type == "directory" {
+			info.Type = EntryTypeDirectory
+		} else {
+			info.Type = EntryTypeFile
+		}
+	}
+	return info, nil
 }
 
 // WriteString is a convenience helper for small text payloads.
@@ -144,9 +219,34 @@ func (f *Filesystem) WriteString(ctx context.Context, path, data string, opts Fs
 	return f.Write(ctx, path, bytes.NewReader([]byte(data)), opts)
 }
 
+// WriteFiles writes multiple files in one call, creating parent directories
+// and overwriting existing files as needed. Each entry is uploaded with the
+// envd-version-appropriate encoding (see Write). It returns the WriteInfo for
+// every entry in order; on the first failure it returns the results gathered so
+// far and the error.
+func (f *Filesystem) WriteFiles(ctx context.Context, entries []WriteEntry, opts FsOptions) ([]WriteInfo, error) {
+	out := make([]WriteInfo, 0, len(entries))
+	for _, e := range entries {
+		info, err := f.uploadOne(ctx, e.Path, bytes.NewReader(e.Data), opts)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, *info)
+	}
+	return out, nil
+}
+
 // Watch starts watching a directory for filesystem events. The returned
 // handle fans events onto a channel; Stop() cancels the stream.
+//
+// Recursive watching requires envd >= 0.1.4; requesting it on an older build
+// returns an error up front instead of failing opaquely at the RPC layer.
 func (f *Filesystem) Watch(ctx context.Context, path string, recursive bool) (*WatchHandle, error) {
+	if recursive && compareEnvdVersions(f.sbx.envdVersionForGating(), envdRecursiveWatch) < 0 {
+		return nil, &TemplateError{Message: fmt.Sprintf(
+			"recursive directory watching requires envd >= %s, but this sandbox runs %s; rebuild the template to use it",
+			envdRecursiveWatch, f.sbx.EnvdVersion)}
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	stream, err := f.sbx.envd.Filesystem.WatchDir(ctx, connect.NewRequest(&fspb.WatchDirRequest{Path: path, Recursive: recursive}))
 	if err != nil {
@@ -168,13 +268,13 @@ func entryInfoFromPB(e *fspb.EntryInfo) *EntryInfo {
 	}
 	var mt = e.GetModifiedTime().AsTime()
 	info := &EntryInfo{
-		Name:        e.GetName(),
-		Path:        e.GetPath(),
-		Size:        e.GetSize(),
-		Mode:        e.GetMode(),
-		Permissions: e.GetPermissions(),
-		Owner:       e.GetOwner(),
-		Group:       e.GetGroup(),
+		Name:         e.GetName(),
+		Path:         e.GetPath(),
+		Size:         e.GetSize(),
+		Mode:         e.GetMode(),
+		Permissions:  e.GetPermissions(),
+		Owner:        e.GetOwner(),
+		Group:        e.GetGroup(),
 		ModifiedTime: mt,
 	}
 	switch e.GetType() {

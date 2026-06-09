@@ -75,6 +75,19 @@ func mapHTTPErr(resp *http.Response, sandboxID string) error {
 	return newSandboxError(httpErr.Error(), nil)
 }
 
+// mapEnvdFileErr translates an unexpected response from envd's /files HTTP
+// endpoint into an SDK error. Unlike mapHTTPErr it maps 404 to
+// *FileNotFoundError (file semantics), matching the Connect-RPC filesystem path
+// (mapConnectErr) so callers can detect a missing file uniformly regardless of
+// transport. Other statuses defer to mapHTTPErr.
+func mapEnvdFileErr(resp *http.Response, path string) error {
+	if resp != nil && resp.StatusCode == http.StatusNotFound {
+		httpErr := transport.ReadHTTPError(resp)
+		return &FileNotFoundError{Path: path, Message: httpErr.Message}
+	}
+	return mapHTTPErr(resp, "")
+}
+
 // contextErr wraps context timeouts into TimeoutError.
 func contextErr(err error) error {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {

@@ -58,14 +58,18 @@ func NewAPIClient(baseURL string, hc *http.Client, auth Auth) (*apiclient.Client
 }
 
 // EnvdAuth is the envd (in-sandbox) access token. It is returned by the
-// control plane when the sandbox is created. For Connect-RPC the token is
-// carried as HTTP Basic auth with the token placed in the *username* slot.
-// For plain HTTP endpoints (/files, /metrics, /envs) the token goes in an
-// X-Access-Token header.
+// control plane when the sandbox is created. The access token goes in an
+// X-Access-Token header on every envd request (RPC and plain HTTP).
+//
+// User is the already-resolved username for HTTP Basic auth. The caller (the
+// e2b package) decides whether to populate it based on the envd version: at or
+// above envd 0.4.0 the server infers the default user, so User is left empty
+// and no Authorization header is sent; below 0.4.0 the caller sets it to the
+// fallback user. An empty User therefore means "omit the Authorization header".
 type EnvdAuth struct {
-	Token    string
-	User     string
-	Headers  map[string]string
+	Token   string
+	User    string
+	Headers map[string]string
 }
 
 // envdStreamHeaderInterceptor sets the envd auth/header set on every unary
@@ -95,12 +99,19 @@ func (a EnvdAuth) applyHeader(h http.Header) {
 	if a.Token != "" {
 		h.Set("X-Access-Token", a.Token)
 	}
-	user := a.User
-	if user == "" {
-		user = "user"
+	// Mirror the upstream SDKs' authenticationHeader: the Basic Authorization
+	// header is governed solely by the resolved user. Only attach it when a
+	// username is resolved; the e2b package leaves User empty for envd >= 0.4.0
+	// so the server can infer the default user. Extra headers must not be able
+	// to inject their own Authorization on the no-user path (that would defeat
+	// default-user inference and could forward a control-plane bearer to envd).
+	if a.User != "" {
+		h.Set("Authorization", "Basic "+basicUserAuth(a.User))
 	}
-	h.Set("Authorization", "Basic "+basicUserAuth(user))
 	for k, v := range a.Headers {
+		if http.CanonicalHeaderKey(k) == "Authorization" {
+			continue
+		}
 		if h.Get(k) == "" {
 			h.Set(k, v)
 		}
@@ -131,12 +142,13 @@ func NewEnvdClients(baseURL string, hc *http.Client, auth EnvdAuth) (*EnvdClient
 		if auth.Token != "" {
 			req.Header.Set("X-Access-Token", auth.Token)
 		}
-		user := auth.User
-		if user == "" {
-			user = "user"
+		if auth.User != "" {
+			req.Header.Set("Authorization", "Basic "+basicUserAuth(auth.User))
 		}
-		req.Header.Set("Authorization", "Basic "+basicUserAuth(user))
 		for k, v := range auth.Headers {
+			if http.CanonicalHeaderKey(k) == "Authorization" {
+				continue
+			}
 			if req.Header.Get(k) == "" {
 				req.Header.Set(k, v)
 			}
