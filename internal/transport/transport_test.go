@@ -3,7 +3,12 @@ package transport
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"connectrpc.com/connect"
+	processpb "github.com/eric642/e2b-go-sdk/internal/envd/process"
 )
 
 func TestAuthSetsAPIKey(t *testing.T) {
@@ -141,6 +146,24 @@ func TestNewEnvdClientsWiresBothClients(t *testing.T) {
 	}
 	if clients.Process == nil || clients.Filesystem == nil || clients.API == nil {
 		t.Fatalf("clients not wired: %+v", clients)
+	}
+}
+
+func TestNewEnvdClientsUsesProtoJSON(t *testing.T) {
+	var contentType string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		contentType = r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	clients, err := NewEnvdClients(server.URL, server.Client(), EnvdAuth{})
+	if err != nil {
+		t.Fatalf("NewEnvdClients: %v", err)
+	}
+	_, _ = clients.Process.List(context.Background(), connect.NewRequest(&processpb.ListRequest{}))
+	if !strings.Contains(contentType, "json") {
+		t.Fatalf("Content-Type=%q, want ProtoJSON", contentType)
 	}
 }
 

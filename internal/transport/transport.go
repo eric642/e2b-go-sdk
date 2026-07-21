@@ -134,6 +134,7 @@ func NewEnvdClients(baseURL string, hc *http.Client, auth EnvdAuth) (*EnvdClient
 	// that speaks both proto and JSON; JSON gives us cleaner debugging).
 	opts := []connect.ClientOption{
 		connect.WithInterceptors(interceptor),
+		connect.WithProtoJSON(),
 	}
 	proc := processconnect.NewProcessClient(hc, baseURL, opts...)
 	fs := filesystemconnect.NewFilesystemClient(hc, baseURL, opts...)
