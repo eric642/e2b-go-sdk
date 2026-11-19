@@ -14,10 +14,11 @@ linters:
     - unused
 
   exclusions:
-    # Generated clients live under internal/ and shouldn't be hand-linted.
+    # Generated clients live under internal/ and upstream submodules shouldn't be hand-linted.
     paths:
       - internal
       - E2B
+      - runtime
 
   settings:
     errcheck:

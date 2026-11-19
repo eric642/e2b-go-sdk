@@ -1,3 +1,6 @@
 [submodule "E2B"]
 	path = E2B
 	url = https://github.com/e2b-dev/E2B
+[submodule "runtime"]
+	path = runtime
+	url = git@github.com:e2b-dev/runtime.git
