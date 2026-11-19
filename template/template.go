@@ -1077,4 +1077,3 @@ func (f *FinalBuilder) ToDockerfile() (string, error) { return f.b.ToDockerfile(
 
 // ToJSON delegates to the underlying Builder.
 func (f *FinalBuilder) ToJSON() (string, error) { return f.b.ToJSON() }
-

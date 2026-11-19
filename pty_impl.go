@@ -10,14 +10,14 @@ import (
 
 // PtyOptions configures Pty.Create.
 type PtyOptions struct {
-	Cmd     string
-	Args    []string
-	Envs    map[string]string
-	Cwd     string
-	Cols    uint32
-	Rows    uint32
-	Tag     string
-	OnData  func([]byte)
+	Cmd    string
+	Args   []string
+	Envs   map[string]string
+	Cwd    string
+	Cols   uint32
+	Rows   uint32
+	Tag    string
+	OnData func([]byte)
 }
 
 // Create starts an interactive PTY session.

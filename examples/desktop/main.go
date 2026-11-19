@@ -36,15 +36,15 @@ import (
 )
 
 const (
-	dockerfilePath     = "e2b.Dockerfile"
-	terminalVNCPort    = 6080 // DISPLAY=:0 — xterm + shared tmux
-	browserVNCPort     = 6081 // DISPLAY=:1 — chromium is launched on demand
-	browserDisplay     = ":1"
-	tmuxSocket         = "main"
-	tmuxSession        = "main"
-	ptyMarker          = "HELLO_FROM_SDK_PTY"
-	templateIDEnv      = "E2B_TEMPLATE_ID"
-	defaultBrowserURL  = "https://google.com"
+	dockerfilePath    = "e2b.Dockerfile"
+	terminalVNCPort   = 6080 // DISPLAY=:0 — xterm + shared tmux
+	browserVNCPort    = 6081 // DISPLAY=:1 — chromium is launched on demand
+	browserDisplay    = ":1"
+	tmuxSocket        = "main"
+	tmuxSession       = "main"
+	ptyMarker         = "HELLO_FROM_SDK_PTY"
+	templateIDEnv     = "E2B_TEMPLATE_ID"
+	defaultBrowserURL = "https://google.com"
 )
 
 func main() {

@@ -120,4 +120,3 @@ func TestToDockerfileWithoutBaseImage(t *testing.T) {
 		t.Fatalf("missing RUN: %s", df)
 	}
 }
-

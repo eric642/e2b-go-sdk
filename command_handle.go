@@ -190,7 +190,9 @@ type eventStream interface {
 	Err() error
 }
 
-type startStream struct{ s *connect.ServerStreamForClient[procpb.StartResponse] }
+type startStream struct {
+	s *connect.ServerStreamForClient[procpb.StartResponse]
+}
 
 func (s *startStream) Receive() bool { return s.s.Receive() }
 func (s *startStream) Err() error    { return s.s.Err() }
@@ -201,7 +203,9 @@ func (s *startStream) Event() *procpb.ProcessEvent {
 	return s.s.Msg().Event
 }
 
-type connectStream struct{ s *connect.ServerStreamForClient[procpb.ConnectResponse] }
+type connectStream struct {
+	s *connect.ServerStreamForClient[procpb.ConnectResponse]
+}
 
 func (s *connectStream) Receive() bool { return s.s.Receive() }
 func (s *connectStream) Err() error    { return s.s.Err() }

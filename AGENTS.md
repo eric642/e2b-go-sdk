@@ -73,21 +73,20 @@ Preserve these invariants whenever modifying SDK or `internal/transport` code:
 Run these after any Go code change:
 
 ```sh
-go vet ./...
-go test -race ./...
+go fmt -mod=readonly ./...
+go vet -mod=readonly ./...
+go test -mod=readonly -race -shuffle=on -count=1 ./...
 golangci-lint run --timeout=5m
 ```
 
+- **Optional `gopls` check**: When `gopls` is installed locally, run `gopls check -severity=hint <modified_files.go>` on edited hand-written `.go` files (surfaces Go `1.26` modernization hints and covers `internal/transport/`).
 - **Linter toolchain note**: `go.mod` targets Go `1.26.x` and `.golangci.yml` uses the v2 schema (`version: "2"`). If `golangci-lint` fails with a Go version mismatch, build it with the matching Go toolchain (`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`).
-- **`internal/transport/` lint blind spot**: `.golangci.yml` excludes `internal` as a whole (along with `E2B` and `runtime`). When editing hand-written code in `internal/transport/`, manually verify `errcheck`, `govet`, `ineffassign`, `staticcheck`, and `unused` cleanliness alongside `go test -race ./internal/transport/...`.
-- **Formatting pitfall (`gofmt`)**: Do **not** run `make fmt` (`gofmt -s -w .`) when `E2B/` or `runtime/` submodules are populated on disk — `gofmt .` will recurse into submodule Go files and dirty them. Format only SDK paths instead:
-  ```sh
-  gofmt -s -w *.go template volume internal/transport examples
-  ```
+- **`internal/transport/` lint blind spot**: `.golangci.yml` excludes `internal` as a whole (along with `E2B` and `runtime`). When editing hand-written code in `internal/transport/`, manually verify `errcheck`, `govet`, `ineffassign`, `staticcheck`, and `unused` cleanliness (and/or `gopls check`) alongside `go test -mod=readonly -race -shuffle=on -count=1 ./internal/transport/...`.
+- **Formatting pitfall (`make fmt` vs. `go fmt ./...`)**: Always prefer `go fmt -mod=readonly ./...`, which respects Go module boundaries and automatically skips `E2B/` and `runtime/`. Do **not** run `make fmt` (`gofmt -s -w .`) when `E2B/` or `runtime/` submodules are populated on disk — `gofmt .` recurses into submodule Go files and dirties them.
 
 ### Integration Tests & Environment Files (`.env` vs. `.env.prod`)
 
-- **Unit tests** (`go test -race ./...`) mock HTTP/Connect-RPC locally via `httptest.NewServer` and must never depend on external network access or `E2B_API_KEY`.
+- **Unit tests** (`go test -mod=readonly -race -shuffle=on -count=1 ./...`) mock HTTP/Connect-RPC locally via `httptest.NewServer` and must never depend on external network access or `E2B_API_KEY`.
 - **Integration tests (`//go:build integration`)**: When modifying wire protocol, transport, auth, or API endpoint behavior, you **may** load `.env` (dev/test credentials) to run relevant integration tests:
   ```sh
   set -a && source .env && set +a && go test -tags=integration -timeout 15m -run TestName ./...
