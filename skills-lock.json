@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "skills": {
+    "ce-simplify-code": {
+      "source": "EveryInc/compound-engineering-plugin",
+      "commit": "8f7614639e7f3792a6f9337d8742a80a232bd596",
+      "sourceType": "github",
+      "skillPath": "skills/ce-simplify-code/SKILL.md",
+      "computedHash": "6413ae2f594027094b92fcd90f37b83b3665afd00b5d6b2dd4b3a1b8c73c4bd0"
+    }
+  }
+}
