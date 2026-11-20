@@ -15,16 +15,34 @@ type Error interface {
 	sandboxError()
 }
 
-// baseError is embedded by every concrete error type so they all satisfy
-// Error automatically.
-type baseError struct{}
+// BaseError is embedded by every concrete SDK error type so they all satisfy
+// Error automatically. Subpackages (template, volume) embed it too so their
+// error types satisfy e2b.Error.
+//
+// For errors decoded from a control-plane HTTP response, StatusCode carries
+// the HTTP status and Code the machine-readable `error_code` from the JSON
+// error body (e.g. "sandbox_capacity_unavailable"); both are zero otherwise.
+type BaseError struct {
+	// StatusCode is the HTTP status of the response this error was decoded
+	// from, or 0.
+	StatusCode int
+	// Code is the server's machine-readable error code (the OpenAPI
+	// Error.error_code field), or "".
+	Code string
+}
 
-func (baseError) sandboxError() {}
+func (BaseError) sandboxError() {}
+
+// ErrorCode returns the server's machine-readable error code, if any.
+func (e BaseError) ErrorCode() string { return e.Code }
+
+// HTTPStatus returns the HTTP status code the error was decoded from, or 0.
+func (e BaseError) HTTPStatus() int { return e.StatusCode }
 
 // SandboxError wraps arbitrary sandbox/API failures that don't have a more
 // specific type.
 type SandboxError struct {
-	baseError
+	BaseError
 	Message string
 	Cause   error
 }
@@ -44,7 +62,7 @@ func newSandboxError(msg string, cause error) *SandboxError {
 // TimeoutError is returned when a request or sandbox operation times out.
 // Mirrors Python's TimeoutException / JS TimeoutError.
 type TimeoutError struct {
-	baseError
+	BaseError
 	Message string
 	Cause   error
 }
@@ -56,7 +74,7 @@ func (e *TimeoutError) Temporary() bool { return true }
 
 // InvalidArgumentError reports an invalid parameter.
 type InvalidArgumentError struct {
-	baseError
+	BaseError
 	Message string
 }
 
@@ -64,7 +82,7 @@ func (e *InvalidArgumentError) Error() string { return "e2b: invalid argument: "
 
 // NotEnoughSpaceError reports the sandbox has insufficient disk space.
 type NotEnoughSpaceError struct {
-	baseError
+	BaseError
 	Message string
 }
 
@@ -72,7 +90,7 @@ func (e *NotEnoughSpaceError) Error() string { return "e2b: not enough space: " 
 
 // NotFoundError is deprecated. Prefer FileNotFoundError or SandboxNotFoundError.
 type NotFoundError struct {
-	baseError
+	BaseError
 	Message string
 }
 
@@ -80,7 +98,7 @@ func (e *NotFoundError) Error() string { return "e2b: not found: " + e.Message }
 
 // FileNotFoundError reports a missing file/directory in the sandbox.
 type FileNotFoundError struct {
-	baseError
+	BaseError
 	Path    string
 	Message string
 }
@@ -94,7 +112,7 @@ func (e *FileNotFoundError) Error() string {
 
 // SandboxNotFoundError reports that the sandbox is gone or never existed.
 type SandboxNotFoundError struct {
-	baseError
+	BaseError
 	SandboxID string
 	Message   string
 }
@@ -108,7 +126,7 @@ func (e *SandboxNotFoundError) Error() string {
 
 // AuthenticationError reports invalid or missing credentials.
 type AuthenticationError struct {
-	baseError
+	BaseError
 	Message string
 }
 
@@ -116,7 +134,7 @@ func (e *AuthenticationError) Error() string { return "e2b: authentication faile
 
 // GitAuthError specializes AuthenticationError for Git credential failures.
 type GitAuthError struct {
-	baseError
+	BaseError
 	Message string
 }
 
@@ -124,7 +142,7 @@ func (e *GitAuthError) Error() string { return "e2b: git authentication failed: 
 
 // GitUpstreamError reports a missing upstream branch.
 type GitUpstreamError struct {
-	baseError
+	BaseError
 	Message string
 }
 
@@ -132,7 +150,7 @@ func (e *GitUpstreamError) Error() string { return "e2b: git upstream error: " +
 
 // TemplateError reports template/envd incompatibility.
 type TemplateError struct {
-	baseError
+	BaseError
 	Message string
 }
 
@@ -140,15 +158,25 @@ func (e *TemplateError) Error() string { return "e2b: template error: " + e.Mess
 
 // RateLimitError reports HTTP 429.
 type RateLimitError struct {
-	baseError
+	BaseError
 	Message string
 }
 
 func (e *RateLimitError) Error() string { return "e2b: rate limit: " + e.Message }
 
+// ConflictError reports HTTP 409 from the control plane (e.g. a resource that
+// already exists, an operation incompatible with the current state, or an
+// idempotency-key conflict; see Code).
+type ConflictError struct {
+	BaseError
+	Message string
+}
+
+func (e *ConflictError) Error() string { return "e2b: conflict: " + e.Message }
+
 // BuildError reports a template build failure.
 type BuildError struct {
-	baseError
+	BaseError
 	Message string
 	Cause   error
 }
@@ -163,7 +191,7 @@ func (e *BuildError) Unwrap() error { return e.Cause }
 
 // FileUploadError reports a file upload failure during template build.
 type FileUploadError struct {
-	baseError
+	BaseError
 	Path    string
 	Message string
 	Cause   error
@@ -176,7 +204,7 @@ func (e *FileUploadError) Unwrap() error { return e.Cause }
 
 // VolumeError reports a volume operation failure.
 type VolumeError struct {
-	baseError
+	BaseError
 	Message string
 	Cause   error
 }
@@ -200,7 +228,7 @@ type CommandResult struct {
 // CommandExitError is returned by CommandHandle.Wait when a command exits
 // non-zero. It embeds CommandResult so callers can inspect output.
 type CommandExitError struct {
-	baseError
+	BaseError
 	Result CommandResult
 }
 

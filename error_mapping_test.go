@@ -3,6 +3,7 @@ package e2b
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -108,102 +109,10 @@ func TestMapConnectErrInternalFallsBackToSandboxError(t *testing.T) {
 }
 
 func TestMapConnectErrNonConnectErrorStillMaps(t *testing.T) {
-	// A plain error (not a connect.Error) should become *SandboxError.
 	err := mapConnectErr(errors.New("plain"))
 	var se *SandboxError
 	if !errors.As(err, &se) {
 		t.Fatalf("want *SandboxError, got %T", err)
-	}
-}
-
-func TestMapHTTPErrSandboxNotFound(t *testing.T) {
-	resp := &http.Response{
-		StatusCode: 404,
-		Body:       io.NopCloser(strings.NewReader(`{"message":"gone"}`)),
-	}
-	err := mapHTTPErr(resp, "sbx-123")
-	var se *SandboxNotFoundError
-	if !errors.As(err, &se) {
-		t.Fatalf("want SandboxNotFoundError, got %T", err)
-	}
-	if se.SandboxID != "sbx-123" {
-		t.Fatalf("SandboxID: %q", se.SandboxID)
-	}
-}
-
-func TestMapHTTPErr404WithoutSandboxIDIsNotFoundError(t *testing.T) {
-	resp := &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader(""))}
-	err := mapHTTPErr(resp, "")
-	var nfe *NotFoundError
-	if !errors.As(err, &nfe) {
-		t.Fatalf("want *NotFoundError, got %T", err)
-	}
-	// Sanity: not accidentally a SandboxNotFoundError.
-	var sne *SandboxNotFoundError
-	if errors.As(err, &sne) {
-		t.Fatal("should not match SandboxNotFoundError without sandboxID")
-	}
-}
-
-func TestMapHTTPErrRateLimit(t *testing.T) {
-	resp := &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader(""))}
-	err := mapHTTPErr(resp, "")
-	var rle *RateLimitError
-	if !errors.As(err, &rle) {
-		t.Fatalf("want RateLimitError, got %T", err)
-	}
-}
-
-func TestMapHTTPErrAuth401(t *testing.T) {
-	resp := &http.Response{StatusCode: 401, Body: io.NopCloser(strings.NewReader(""))}
-	err := mapHTTPErr(resp, "")
-	var ae *AuthenticationError
-	if !errors.As(err, &ae) {
-		t.Fatalf("want AuthenticationError, got %T", err)
-	}
-}
-
-func TestMapHTTPErrAuth403(t *testing.T) {
-	resp := &http.Response{StatusCode: 403, Body: io.NopCloser(strings.NewReader(""))}
-	err := mapHTTPErr(resp, "")
-	var ae *AuthenticationError
-	if !errors.As(err, &ae) {
-		t.Fatalf("want AuthenticationError, got %T", err)
-	}
-}
-
-func TestMapHTTPErrInsufficientStorage(t *testing.T) {
-	resp := &http.Response{StatusCode: 507, Body: io.NopCloser(strings.NewReader(""))}
-	err := mapHTTPErr(resp, "")
-	var ns *NotEnoughSpaceError
-	if !errors.As(err, &ns) {
-		t.Fatalf("want NotEnoughSpaceError, got %T", err)
-	}
-}
-
-func TestMapHTTPErrTimeouts(t *testing.T) {
-	for _, code := range []int{408, 504} {
-		resp := &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(""))}
-		err := mapHTTPErr(resp, "")
-		var te *TimeoutError
-		if !errors.As(err, &te) {
-			t.Fatalf("code %d: want TimeoutError, got %T", code, err)
-		}
-	}
-}
-
-func TestMapHTTPErrNilResponse(t *testing.T) {
-	err := mapHTTPErr(nil, "")
-	var se *SandboxError
-	if !errors.As(err, &se) {
-		t.Fatalf("want *SandboxError for nil resp, got %T", err)
-	}
-}
-
-func TestMapHTTPErrSuccessReturnsNil(t *testing.T) {
-	resp := &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(""))}
-	if err := mapHTTPErr(resp, ""); err != nil {
-		t.Fatalf("expected nil, got %v", err)
 	}
 }
 
@@ -229,5 +138,80 @@ func TestContextErrIgnoresOthers(t *testing.T) {
 	}
 	if contextErr(nil) != nil {
 		t.Fatal("nil input should return nil")
+	}
+}
+
+func jsonResp(status int, body string) *http.Response {
+	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}
+}
+
+func TestDecodeAPIErrorStatusMapping(t *testing.T) {
+	body := `{"code":%d,"error_code":"some_code","message":"msg"}`
+	cases := []struct {
+		status    int
+		sandboxID string
+		check     func(error) bool
+	}{
+		{400, "", func(e error) bool { _, ok := errors.AsType[*InvalidArgumentError](e); return ok }},
+		{401, "", func(e error) bool { _, ok := errors.AsType[*AuthenticationError](e); return ok }},
+		{403, "", func(e error) bool { _, ok := errors.AsType[*AuthenticationError](e); return ok }},
+		{404, "sbx-1", func(e error) bool {
+			x, ok := errors.AsType[*SandboxNotFoundError](e)
+			return ok && x.SandboxID == "sbx-1"
+		}},
+		{404, "", func(e error) bool { _, ok := errors.AsType[*NotFoundError](e); return ok }},
+		{409, "", func(e error) bool { _, ok := errors.AsType[*ConflictError](e); return ok }},
+		{429, "", func(e error) bool { _, ok := errors.AsType[*RateLimitError](e); return ok }},
+		{507, "", func(e error) bool { _, ok := errors.AsType[*NotEnoughSpaceError](e); return ok }},
+		{408, "", func(e error) bool { _, ok := errors.AsType[*TimeoutError](e); return ok }},
+		{504, "", func(e error) bool { _, ok := errors.AsType[*TimeoutError](e); return ok }},
+		{500, "", func(e error) bool { _, ok := errors.AsType[*SandboxError](e); return ok }},
+		{502, "", func(e error) bool { _, ok := errors.AsType[*SandboxError](e); return ok }},
+		{503, "", func(e error) bool { _, ok := errors.AsType[*SandboxError](e); return ok }},
+	}
+	for _, c := range cases {
+		err := DecodeAPIError(jsonResp(c.status, fmt.Sprintf(body, c.status)), c.sandboxID)
+		if err == nil || !c.check(err) {
+			t.Errorf("%d: unexpected %T: %v", c.status, err, err)
+			continue
+		}
+		if _, ok := errors.AsType[Error](err); !ok {
+			t.Errorf("%d: %T does not implement e2b.Error", c.status, err)
+		}
+		coder, ok := err.(interface {
+			ErrorCode() string
+			HTTPStatus() int
+		})
+		if !ok || coder.ErrorCode() != "some_code" || coder.HTTPStatus() != c.status {
+			t.Errorf("%d: Code/StatusCode not captured: %v", c.status, err)
+		}
+		if !strings.Contains(err.Error(), "msg") {
+			t.Errorf("%d: message missing: %q", c.status, err.Error())
+		}
+	}
+}
+
+func TestDecodeAPIErrorSuccessAndNil(t *testing.T) {
+	if err := DecodeAPIError(jsonResp(204, ""), ""); err != nil {
+		t.Fatalf("2xx should be nil, got %v", err)
+	}
+	if _, ok := errors.AsType[*SandboxError](DecodeAPIError(nil, "")); !ok {
+		t.Fatal("nil response should map to *SandboxError")
+	}
+}
+
+func TestDecodeAPIErrorPlainTextBody(t *testing.T) {
+	err := DecodeAPIError(jsonResp(409, "already exists"), "")
+	ce, ok := errors.AsType[*ConflictError](err)
+	if !ok || ce.Message != "already exists" || ce.Code != "" || ce.StatusCode != 409 {
+		t.Fatalf("got %#v", err)
+	}
+}
+
+func TestMapEnvdFileErrCapturesCode(t *testing.T) {
+	err := mapEnvdFileErr(jsonResp(404, `{"code":404,"message":"no such file"}`), "/a")
+	fe, ok := errors.AsType[*FileNotFoundError](err)
+	if !ok || fe.Path != "/a" || fe.StatusCode != 404 || fe.Message != "no such file" {
+		t.Fatalf("got %#v", err)
 	}
 }

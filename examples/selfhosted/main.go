@@ -1,6 +1,11 @@
-// Self-hosted example: point the SDK at a self-hosted E2B control plane and
-// show the current sandbox session (ID, template, state, timing, envd info,
-// live metrics).
+// Self-hosted example: point the SDK at a self-hosted E2B control plane
+// (runtime <= 2026.30, including pre-2025.31 deployments) and inspect the
+// sandbox session (ID, template, state, timing, envd info, live metrics).
+//
+// Self-hosted releases through runtime 2026.30 expose POST /sandboxes rather
+// than E2B Cloud's POST /v2/sandboxes, so this example calls client.CreateV1
+// (which defaults secure=true so the server mints an EnvdAccessToken; pass
+// Insecure: true only for legacy pre-0.2.0 envd templates).
 //
 // Usage:
 //
@@ -29,7 +34,7 @@ func main() {
 	cfg := e2b.Config{
 		APIKey: os.Getenv("E2B_API_KEY"),
 		Domain: envOr("E2B_DOMAIN", "e2b.example.com"),
-		APIURL: os.Getenv("E2B_API_URL"), // optional; derived from Domain if empty
+		APIURL: os.Getenv("E2B_API_URL"),
 		Headers: map[string]string{
 			"X-Client": "selfhosted-example",
 		},
@@ -43,14 +48,13 @@ func main() {
 		log.Fatalf("client: %v", err)
 	}
 
-	sbx, err := client.Create(ctx, e2b.CreateOptions{
+	sbx, err := client.CreateV1(ctx, e2b.CreateOptions{
 		Template: envOr("E2B_TEMPLATE", "base"),
 		Timeout:  5 * time.Minute,
 		Metadata: map[string]string{"example": "selfhosted"},
-		Secure:   true,
 	})
 	if err != nil {
-		log.Fatalf("create: %v", err)
+		log.Fatalf("create v1: %v", err)
 	}
 	defer func() {
 		if err := sbx.Kill(ctx); err != nil {

@@ -3,6 +3,7 @@ package e2b
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -11,8 +12,6 @@ import (
 	"github.com/eric642/e2b-go-sdk/internal/transport"
 )
 
-// mapConnectErr translates a Connect-RPC error into one of the SDK error
-// types. Fallback is *SandboxError.
 func mapConnectErr(err error) error {
 	if err == nil {
 		return nil
@@ -46,10 +45,30 @@ func mapConnectErr(err error) error {
 	return newSandboxError(msg, err)
 }
 
-// mapHTTPErr translates an unexpected HTTP response into an SDK error. The
-// resp body is consumed via transport.ReadHTTPError. sandboxID optionally
-// annotates SandboxNotFoundError when mapping 404 from a sandbox endpoint.
 func mapHTTPErr(resp *http.Response, sandboxID string) error {
+	return DecodeAPIError(resp, sandboxID)
+}
+
+// DecodeAPIError translates a non-2xx control-plane HTTP response into an
+// e2b.Error, decoding the JSON error body ({"code", "message", "error_code"})
+// into the error message and BaseError.Code / BaseError.StatusCode. It
+// returns nil for a 2xx response. The body is read (up to 1 MiB) but not
+// closed; the caller still owns resp.Body.
+//
+// Status mapping:
+//
+//	400       -> *InvalidArgumentError
+//	401, 403  -> *AuthenticationError
+//	404       -> *SandboxNotFoundError when sandboxID != "", else *NotFoundError
+//	409       -> *ConflictError
+//	429       -> *RateLimitError
+//	507       -> *NotEnoughSpaceError
+//	408, 504  -> *TimeoutError
+//	otherwise -> *SandboxError (including 5xx such as 500/502/503)
+//
+// template and volume pass sandboxID "" and may re-wrap *NotFoundError into
+// their own resource-specific types.
+func DecodeAPIError(resp *http.Response, sandboxID string) error {
 	if resp == nil {
 		return newSandboxError("empty response", nil)
 	}
@@ -57,38 +76,64 @@ func mapHTTPErr(resp *http.Response, sandboxID string) error {
 		return nil
 	}
 	httpErr := transport.ReadHTTPError(resp)
-	switch resp.StatusCode {
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return &AuthenticationError{Message: httpErr.Message}
-	case http.StatusNotFound:
-		if sandboxID != "" {
-			return &SandboxNotFoundError{SandboxID: sandboxID, Message: httpErr.Message}
-		}
-		return &NotFoundError{Message: httpErr.Message}
-	case http.StatusTooManyRequests:
-		return &RateLimitError{Message: httpErr.Message}
-	case http.StatusInsufficientStorage:
-		return &NotEnoughSpaceError{Message: httpErr.Message}
-	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
-		return &TimeoutError{Message: httpErr.Message}
-	}
-	return newSandboxError(httpErr.Error(), nil)
+	return classifyStatusError(resp.StatusCode, httpErr.Code, httpErr.Message, sandboxID, httpErr.Error())
 }
 
-// mapEnvdFileErr translates an unexpected response from envd's /files HTTP
-// endpoint into an SDK error. Unlike mapHTTPErr it maps 404 to
-// *FileNotFoundError (file semantics), matching the Connect-RPC filesystem path
-// (mapConnectErr) so callers can detect a missing file uniformly regardless of
-// transport. Other statuses defer to mapHTTPErr.
+// ClassifyAPIError classifies an HTTP status code, machine-readable error code,
+// and error message into the corresponding e2b.Error type using the same status
+// mapping as DecodeAPIError. It returns nil for a 2xx status.
+func ClassifyAPIError(status int, code, msg, sandboxID string) error {
+	if status >= 200 && status < 300 {
+		return nil
+	}
+	fallback := fmt.Sprintf("http %d: %s", status, msg)
+	if msg == "" {
+		if code != "" {
+			fallback = fmt.Sprintf("http %d: %s", status, code)
+		} else {
+			fallback = fmt.Sprintf("http %d", status)
+		}
+	}
+	return classifyStatusError(status, code, msg, sandboxID, fallback)
+}
+
+func classifyStatusError(status int, code, msg, sandboxID, fallbackMsg string) error {
+	base := BaseError{StatusCode: status, Code: code}
+	switch status {
+	case http.StatusBadRequest:
+		return &InvalidArgumentError{BaseError: base, Message: msg}
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return &AuthenticationError{BaseError: base, Message: msg}
+	case http.StatusNotFound:
+		if sandboxID != "" {
+			return &SandboxNotFoundError{BaseError: base, SandboxID: sandboxID, Message: msg}
+		}
+		return &NotFoundError{BaseError: base, Message: msg}
+	case http.StatusConflict:
+		return &ConflictError{BaseError: base, Message: msg}
+	case http.StatusTooManyRequests:
+		return &RateLimitError{BaseError: base, Message: msg}
+	case http.StatusInsufficientStorage:
+		return &NotEnoughSpaceError{BaseError: base, Message: msg}
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
+		return &TimeoutError{BaseError: base, Message: msg}
+	default:
+		return &SandboxError{BaseError: base, Message: fallbackMsg}
+	}
+}
+
 func mapEnvdFileErr(resp *http.Response, path string) error {
 	if resp != nil && resp.StatusCode == http.StatusNotFound {
 		httpErr := transport.ReadHTTPError(resp)
-		return &FileNotFoundError{Path: path, Message: httpErr.Message}
+		return &FileNotFoundError{
+			BaseError: BaseError{StatusCode: resp.StatusCode, Code: httpErr.Code},
+			Path:      path,
+			Message:   httpErr.Message,
+		}
 	}
 	return mapHTTPErr(resp, "")
 }
 
-// contextErr wraps context timeouts into TimeoutError.
 func contextErr(err error) error {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return &TimeoutError{Message: err.Error(), Cause: err}

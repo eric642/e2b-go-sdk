@@ -37,3 +37,24 @@ func TestFromBunImage_Variant(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestFromFedoraAlpineArchImages(t *testing.T) {
+	if got := New().FromFedoraImage("").BaseImage(); got != "fedora:44" {
+		t.Fatalf("Fedora default: %q", got)
+	}
+	if got := New().FromFedoraImage("43").BaseImage(); got != "fedora:43" {
+		t.Fatalf("Fedora variant: %q", got)
+	}
+	if got := New().FromAlpineImage("").BaseImage(); got != "alpine:3.24" {
+		t.Fatalf("Alpine default: %q", got)
+	}
+	if got := New().FromAlpineImage("3.20").BaseImage(); got != "alpine:3.20" {
+		t.Fatalf("Alpine variant: %q", got)
+	}
+	if got := New().FromArchImage("").BaseImage(); got != "archlinux:latest" {
+		t.Fatalf("Arch default: %q", got)
+	}
+	if got := New().FromArchImage("base-devel").BaseImage(); got != "archlinux:base-devel" {
+		t.Fatalf("Arch variant: %q", got)
+	}
+}

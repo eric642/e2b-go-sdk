@@ -1,6 +1,8 @@
 package e2b
 
 import (
+	"errors"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +31,6 @@ func TestGetSignatureWithExpirationIncludesTimestamp(t *testing.T) {
 		t.Fatalf("expected expiration, got nil")
 	}
 	after := time.Now().Unix()
-	// Expiration should be "now + 60s", allowing for a ±2s skew.
 	if *sig.Expiration < before+60-2 || *sig.Expiration > after+60+2 {
 		t.Fatalf("expiration %d not within [%d, %d]", *sig.Expiration, before+60, after+60)
 	}
@@ -41,13 +42,17 @@ func TestGetSignatureRequiresToken(t *testing.T) {
 	}
 }
 
+func TestGetSignatureRejectsNegativeExpiration(t *testing.T) {
+	_, err := GetSignature("/p", SignatureRead, "tok", SignatureOptions{ExpirationInSeconds: -5})
+	if _, ok := errors.AsType[*InvalidArgumentError](err); !ok {
+		t.Fatalf("want *InvalidArgumentError, got %T: %v", err, err)
+	}
+}
+
 // TestGetSignatureParity hard-codes a byte-for-byte reference signature
 // computed against the Python SDK's get_signature implementation. If this
 // breaks, the Go, JS, or Python signature algorithms have diverged and envd
-// will reject requests. The Python reference is:
-//
-//	raw = "/home/user/out.txt:read:user:token-abc"
-//	hashlib.sha256(raw.encode()).digest()  → base64 std encoding, strip '='
+// will reject requests.
 func TestGetSignatureParity(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -74,7 +79,6 @@ func TestGetSignatureParity(t *testing.T) {
 			want:  "v1_m/rfMpzS94/bBwZRX7EPGZHVOBFF9Dak0Hu8XGgHCFg",
 		},
 		{
-			// Empty user is still valid (empty slot in the raw string).
 			name:  "empty-user",
 			path:  "/p",
 			op:    SignatureRead,
@@ -90,7 +94,7 @@ func TestGetSignatureParity(t *testing.T) {
 				t.Fatalf("GetSignature: %v", err)
 			}
 			if sig.Value != tc.want {
-				t.Fatalf("parity drift:\n  got:  %s\n  want: %s\n  (fix Go, JS, or Python — they must all agree)", sig.Value, tc.want)
+				t.Fatalf("parity drift:\n  got:  %s\n  want: %s", sig.Value, tc.want)
 			}
 		})
 	}
@@ -107,5 +111,75 @@ func TestGetSignatureReadVsWriteDiverge(t *testing.T) {
 	}
 	if read.Value == write.Value {
 		t.Fatalf("read and write signatures should differ for same inputs")
+	}
+}
+
+func TestUploadURLOmitsPathWhenEmpty(t *testing.T) {
+	sbx := &Sandbox{
+		ID:              "sbx-1",
+		Domain:          "example.com",
+		EnvdVersion:     "0.6.13",
+		EnvdAccessToken: "tok",
+		cfg:             Config{Domain: "example.com"},
+	}
+	raw, err := sbx.UploadURL("", SignatureOptions{})
+	if err != nil {
+		t.Fatalf("UploadURL: %v", err)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	if u.Query().Has("path") {
+		t.Fatalf("UploadURL(\"\") must omit path query param, got %s", raw)
+	}
+	if u.Query().Has("username") {
+		t.Fatalf("UploadURL on envd >= 0.4.0 must omit default username, got %s", raw)
+	}
+	wantSig, err := GetSignature("", SignatureWrite, "tok", SignatureOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := u.Query().Get("signature"); got != wantSig.Value {
+		t.Fatalf("signature = %q, want %q", got, wantSig.Value)
+	}
+
+	unsigned := &Sandbox{
+		ID:          "sbx-1",
+		Domain:      "example.com",
+		EnvdVersion: "0.6.13",
+		cfg:         Config{Domain: "example.com"},
+	}
+	bareURL, err := unsigned.SignedUploadURL("", SignatureOptions{})
+	if err != nil {
+		t.Fatalf("SignedUploadURL: %v", err)
+	}
+	if bareURL != "https://49983-sbx-1.example.com/files" {
+		t.Fatalf("bareURL = %q, want https://49983-sbx-1.example.com/files", bareURL)
+	}
+}
+
+func TestSignedURLsRejectExpirationWithoutAccessToken(t *testing.T) {
+	sbx := &Sandbox{
+		ID:          "sbx-1",
+		Domain:      "example.com",
+		EnvdVersion: "0.6.13",
+		cfg:         Config{Domain: "example.com"},
+	}
+	for name, fn := range map[string]func() (string, error){
+		"UploadURL":         func() (string, error) { return sbx.UploadURL("/a", SignatureOptions{ExpirationInSeconds: 30}) },
+		"DownloadURL":       func() (string, error) { return sbx.DownloadURL("/a", SignatureOptions{ExpirationInSeconds: 30}) },
+		"SignedUploadURL":   func() (string, error) { return sbx.SignedUploadURL("/a", SignatureOptions{ExpirationInSeconds: 30}) },
+		"SignedDownloadURL": func() (string, error) { return sbx.SignedDownloadURL("/a", SignatureOptions{ExpirationInSeconds: 30}) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := fn()
+			if got != "" {
+				t.Fatalf("expected empty URL on error, got %q", got)
+			}
+			if _, ok := errors.AsType[*InvalidArgumentError](err); !ok {
+				t.Fatalf("want *InvalidArgumentError, got %T: %v", err, err)
+			}
+		})
 	}
 }

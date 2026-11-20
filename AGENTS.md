@@ -1,76 +1,50 @@
 # AGENTS.md
 
-Instructions for AI coding agents working in `github.com/eric642/e2b-go-sdk`.
+Unofficial Go `1.26+` SDK (`github.com/eric642/e2b-go-sdk`), wire-compatible with E2B JS/Python SDKs on Cloud & self-hosted.
 
-## Repository Overview
+## Baselines & Package Map
 
-`e2b-go-sdk` is an unofficial, community-maintained Go client SDK (Go `1.26+`) for the E2B sandbox platform, staying wire-compatible with the official JavaScript and Python SDKs and the E2B backend.
+- **Baselines**: `e2b@2.64.0` (`spec/E2B_VERSION`, `VERSION`), `runtime <= 2026.30`, `envd-v0.6.13`.
+- **`.` (`e2b`)**: `Client` (control-plane retries vs. stream data plane), `Sandbox`, `Config`, `Error`, `versions.go`.
+- **`template/`**: `Builder`, `ReadyCmd`, `/v3` & `/v2` builds, listing, visibility, tags.
+- **`volume/`**: Volume control plane, BYOC routing, JWT `belt` content API.
+- **`internal/transport/`**: REST/Connect-RPC wiring, retries, header isolation, error decoding.
+- **`internal/{api,envd,envdapi,volumeapi,version}/`**: Generated code (**never hand-edit**).
+- **`spec/` & `scripts/`**: Filtered specs, codegen configs, `sync-spec.sh`, `filter_spec.go`.
+- **`examples/`**: Runnable Cloud & self-hosted examples.
+- **`E2B/` & `runtime/`**: Read-only upstream submodules.
 
-### Package & Directory Map
+## Submodules & Codegen
 
-- **`.` (`package e2b`)**: Core public SDK — unified `Client` (`NewClient`, sharing a single `*http.Client` and control-plane REST client; preferred over deprecated package-level `Create`/`Connect`/`Kill` wrappers), `Sandbox` lifecycle, `Commands`, `Pty`, `Filesystem`, `Git`, `Snapshots`, `List` / `ListAll` cursor pagination, `Config`, `Error` hierarchy, and `EnvdVersion` feature gating (`versions.go`).
-- **`template/` (`package template`)**: Fluent template `Builder`, `ReadyCmd` helpers, and build orchestration (`/v3/templates` via `Build`/`BuildStream`/`BuildInBackground`, plus legacy `BuildV2` counterparts for self-hosted deployments `<= 2.1.x`).
-- **`volume/` (`package volume`)**: Persistent volume control-plane operations and JWT-scoped volume content client.
-- **`internal/transport/` (hand-written)**: Wires REST (`oapi-codegen`) and Connect-RPC (`connect.WithProtoJSON()`) clients, control-plane vs. `envd` auth headers, and transport error decoding.
-- **`internal/{api,envd,envdapi,volumeapi}/` & `internal/version/upstream.go` (generated)**: Generated REST/Connect-RPC clients and pinned upstream version metadata. **Never edit by hand.**
-- **`spec/`**: Vendored OpenAPI (`openapi.yml`, `openapi-volumecontent.yml`, `envd/envd.yaml`), Protobuf (`envd/process/process.proto`, `envd/filesystem/filesystem.proto`), `oapi-codegen-*.yaml` configs, and `E2B_VERSION`.
-- **`examples/`**: Runnable end-to-end examples (`basic`, `terminal`, `template`, `lifecycle`, `lifecycle_v2`, `selfhosted`, `desktop`).
-- **`E2B/` & `runtime/` (git submodules)**: Read-only upstream reference repositories (see below).
+- **Read-only submodules**: Never modify, format, or checkout `E2B/` or `runtime/` unless asked.
+  - `E2B/`: JS/Python SDK reference & spec source (`E2B/spec/` -> `./spec/`).
+  - `runtime/`: Go server/`envd` source & specs (`packages/{api,envd,client-proxy,orchestrator,shared}`).
+- **Codegen** (never hand-edit `internal/{api,envd,envdapi,volumeapi,version}/`; edit `./spec/` or `scripts/filter_spec.go`):
+  ```sh
+  make sync-spec E2B_TAG=e2b@2.64.0  # sync & filter ./spec/
+  make codegen                       # regenerate internal/
+  make regen                         # sync-spec + codegen
+  ```
 
-## Upstream Submodules & Spec Synchronization
+## Wire, Auth & Versioning Invariants
 
-Both `E2B/` and `runtime/` are **strictly read-only reference submodules**:
+- **Auth & headers**:
+  - Control plane: `X-API-Key` (wins over `Bearer`; never both) or `Bearer`, plus `Config.Headers`.
+  - `envd`: `X-Access-Token`, `E2b-Sandbox-Id`, `E2b-Sandbox-Port: 49983`, `Keepalive-Ping-Interval: 50` (streams), `ExtraSandboxHeaders` **only** (never `Config.Headers`), optional `Basic` auth (never inject `Authorization` when `User == ""`).
+  - Volume content: `Bearer <volumeJWT>` only.
+- **Connect-RPC**: Keep `connect.WithProtoJSON()` on `envd` clients.
+- **Coexistence vs. adaptation**:
+  - 1-to-1 control plane (`Create`/`CreateV1`, `Connect`/`ConnectV1`/`Resume`, `List`/`ListV1`, `GetLogs`/`GetLogsV1`, `Build*`/`Build*V2`): **zero hidden fallback** (see `README.md` matrix).
+  - Composite & `envd` data plane: `IsRunning`, empty `state`, MCP, S3/Azure uploads, template `401`/`logs`, BYOC `domain`, and `EnvdVersion` SemVer gates (`versions.go` is source of truth; `99.99.99` in `Debug`) adapt internally.
+- **GoDoc rules**:
+  - Unversioned `E2B Cloud` (no `e2b@...` tags in `Compatibility:`), `runtime <= 2026.30` / `<calver>`, `v0.x.y` (`envd`).
+  - Omit `Endpoint:`/`Compatibility:`/`Envd:` on local constructors/builders/getters (no `N/A`); omit `Envd:` when unused.
+  - Distinguish soft-deprecated active OpenAPI routes (e.g. `Resume`, `CreateV1` — explain *why*, where active, *when* to choose; no bare `(deprecated)`) from retired `410 Gone` routes (`Build*V2` on Cloud, active on `runtime <= 2026.30`).
+- **Errors & `Config`**:
+  - Public errors in `.`, `template/`, `volume/` implement `e2b.Error` (`*FileNotFoundError`, `*SandboxNotFoundError`).
+  - Clone maps and pointer options in `Config`.
 
-- **Never modify, format, or create files inside `E2B/` or `runtime/`.**
-- **Never advance or detach submodule commits** unless running an explicit spec-sync task or instructed by the user.
-
-### Roles of Each Submodule
-
-1. **`E2B/` (`e2b-dev/E2B`)**
-   - Reference implementation for SDK ergonomics, defaults, error semantics, and version gates (`E2B/packages/js-sdk`, `E2B/packages/python-sdk`).
-   - Default spec source for `scripts/sync-spec.sh` (`E2B/spec/` -> `./spec/`).
-2. **`runtime/` (`e2b-dev/runtime`)**
-   - Authoritative Go backend and in-sandbox daemon source (`runtime/packages/api`, `runtime/packages/envd`, `runtime/packages/client-proxy`, `runtime/packages/orchestrator`, `runtime/packages/shared`). Consult it to verify real server/`envd` handlers, status codes, headers, streaming behavior, and self-hosted compatibility.
-   - Secondary/upstream spec source (`runtime/spec/openapi*.yml` for control-plane/edge OpenAPI and `runtime/packages/envd/spec/` for `envd` OpenAPI and Connect-RPC `.proto` definitions) when comparing against or syncing newer backend specs not yet reflected in `E2B/spec/`.
-
-### Regenerating Clients
-
-```sh
-make tools                           # one-time install: buf, oapi-codegen, protoc-gen-go, protoc-gen-connect-go
-make sync-spec E2B_TAG=e2b@X.Y.Z     # sync ./spec/, VERSION, spec/E2B_VERSION, internal/version/upstream.go
-make codegen                         # buf generate + oapi-codegen into internal/
-make regen                           # sync-spec + codegen in one step
-make version                         # print current SDK version and pinned upstream spec ref
-```
-
-If generated code needs to change, update `./spec/`, `buf.gen.yaml`, `spec/oapi-codegen-*.yaml`, or `scripts/sync-spec.sh` and re-run `make codegen` — never patch generated files under `internal/` directly.
-
-## Wire Protocol, Auth & Versioning Invariants
-
-Preserve these invariants whenever modifying SDK or `internal/transport` code:
-
-- **Control-plane vs. `envd` auth isolation**:
-  - Control plane (`https://api.<domain>`): authenticates with `X-API-Key` (`APIKey` wins if both are set) or `Authorization: Bearer <AccessToken>`.
-  - In-sandbox `envd` (`https://49983-<sandboxID>.<domain>`): authenticates with `X-Access-Token` plus optional `Authorization: Basic <base64(user+":")>`. `ExtraSandboxHeaders` must **never** inject or override `Authorization` when `User` is empty (doing so breaks server-side default-user inference on `envd >= 0.4.0` and risks leaking control-plane tokens to `envd`).
-- **Connect-RPC codec**: `NewEnvdClients` must keep `connect.WithProtoJSON()` enabled for `Process` and `Filesystem` clients to match upstream JS/Python wire behavior.
-- **Control-plane API versions**:
-  - Sandbox listing uses `GET /v2/sandboxes` with cursor pagination via the `x-next-token` response header.
-  - Template builds use v3 (`/v3/templates`) by default; preserve v2 (`*V2`) methods for legacy self-hosted E2B deployments (`<= 2.1.x`).
-  - `Connect` resumes paused sandboxes (there is no separate `Resume` endpoint).
-- **`envd` semver gating (`versions.go` against `Sandbox.EnvdVersion`, or `99.99.99` when `Config.Debug` is true)**:
-  - `>= 0.1.4`: recursive `Filesystem.Watch` (`WatchDir` streaming RPC; polling watcher RPCs `CreateWatcher`/`GetWatcherEvents`/`RemoveWatcher` are intentionally unexposed).
-  - `>= 0.4.0`: omit default username and `Authorization` header unless caller explicitly provides a user; `< 0.4.0` falls back to `DefaultUser`.
-  - `>= 0.5.2`: `Commands.CloseStdin` supported (fail fast with a clear error on older builds).
-  - `>= 0.5.7`: `Filesystem` uploads use `application/octet-stream`; `< 0.5.7` falls back to streaming `multipart/form-data`.
-- **Error hierarchy & config safety**:
-  - Public errors must implement `e2b.Error` (`errors.go`, `error_mapping.go`). Map missing files to `*FileNotFoundError` across both Connect-RPC and plain HTTP `/files`, and missing sandboxes to `*SandboxNotFoundError`.
-  - Deep-copy caller-provided maps (`Headers`, `ExtraSandboxHeaders`) when storing or returning `Config` to prevent aliasing races.
-
-## Build, Lint, Formatting & Testing
-
-### Standard Verification Gates
-
-Run these after any Go code change:
+## Verification Gates
 
 ```sh
 go fmt -mod=readonly ./...
@@ -79,36 +53,20 @@ go test -mod=readonly -race -shuffle=on -count=1 ./...
 golangci-lint run --timeout=5m
 ```
 
-- **Optional `gopls` check**: When `gopls` is installed locally, run `gopls check -severity=hint <modified_files.go>` on edited hand-written `.go` files (surfaces Go `1.26` modernization hints and covers `internal/transport/`).
-- **Linter toolchain note**: `go.mod` targets Go `1.26.x` and `.golangci.yml` uses the v2 schema (`version: "2"`). If `golangci-lint` fails with a Go version mismatch, build it with the matching Go toolchain (`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`).
-- **`internal/transport/` lint blind spot**: `.golangci.yml` excludes `internal` as a whole (along with `E2B` and `runtime`). When editing hand-written code in `internal/transport/`, manually verify `errcheck`, `govet`, `ineffassign`, `staticcheck`, and `unused` cleanliness (and/or `gopls check`) alongside `go test -mod=readonly -race -shuffle=on -count=1 ./internal/transport/...`.
-- **Formatting pitfall (`make fmt` vs. `go fmt ./...`)**: Always prefer `go fmt -mod=readonly ./...`, which respects Go module boundaries and automatically skips `E2B/` and `runtime/`. Do **not** run `make fmt` (`gofmt -s -w .`) when `E2B/` or `runtime/` submodules are populated on disk — `gofmt .` recurses into submodule Go files and dirties them.
+- **Never run `make fmt`** — `gofmt .` dirties `E2B/` & `runtime/`; use `go fmt -mod=readonly ./...`.
+- Run `gopls check -severity=hint <files.go>` when available.
+- `.golangci.yml` excludes `internal/` — check `errcheck`/`govet`/`staticcheck`/`unused` in `internal/transport/`.
 
-### Integration Tests & Environment Files (`.env` vs. `.env.prod`)
+## Testing, Git & PR Review
 
-- **Unit tests** (`go test -mod=readonly -race -shuffle=on -count=1 ./...`) mock HTTP/Connect-RPC locally via `httptest.NewServer` and must never depend on external network access or `E2B_API_KEY`.
-- **Integration tests (`//go:build integration`)**: When modifying wire protocol, transport, auth, or API endpoint behavior, you **may** load `.env` (dev/test credentials) to run relevant integration tests:
-  ```sh
-  set -a && source .env && set +a && go test -tags=integration -timeout 15m -run TestName ./...
-  ```
-  Always ensure live sandboxes, snapshots, templates, and volumes created in tests register cleanup (`t.Cleanup` / `defer Kill`), and **never** print or log secret values (`E2B_API_KEY`, `E2B_ACCESS_TOKEN`).
-- **Production environment off-limits**: **Never** read, source, modify, or execute commands/tests against `.env.prod` unless the user explicitly instructs you to in the current turn.
-
-## Git & Release Rules
-
-- **No unrequested Git mutations**: Do **not** run `git commit`, `git push`, `git tag`, or destructive git operations (`git reset --hard`, `git checkout --`, force-push) unless explicitly asked by the user.
-- **Release tag hazard**: Pushing any `v*` tag immediately triggers `.github/workflows/release.yml` to publish a GitHub Release.
-- **Commit style (when asked to commit)**:
-  - Imperative English subject line under 72 characters; body explains *why* rather than *what*.
-  - Keep `internal/` codegen updates in a separate commit from hand-written SDK changes whenever practical.
-  - Verify `git status` before committing so `.env`, `.env.prod`, compiled example binaries, and accidental submodule modifications are never staged.
-
-## Code & PR Review Guidelines
-
-When asked to review code or pull requests in this repository:
-
-- Focus on concrete bugs, regressions, and behavioral risks:
-  - Concurrency & resource lifecycles: data races, goroutine leaks, unclosed `http.Response.Body` or streaming connections (`CommandHandle`, `WatchHandle`, PTY streams), and missing `context.Context` cancellation handling.
-  - Protocol & auth correctness: control-plane vs. `envd` header isolation, `ProtoJSON` compatibility, cursor pagination (`x-next-token`), and v2/v3 endpoint behavior.
-  - Backwards compatibility: `EnvdVersion` feature gates in `versions.go`, error-type mapping (`*FileNotFoundError` vs. `*SandboxNotFoundError` vs. `*BuildError`), and parity with `E2B/` SDKs and `runtime/` server handlers.
-- Skip pure style, formatting, or naming nits already enforced by `gofmt` and `golangci-lint` (except real lint/error-handling issues inside `internal/transport/`, which `.golangci.yml` excludes).
+- **Tests & `.env`**:
+  - Unit tests stay offline (`httptest.NewServer`).
+  - Integration tests (`//go:build integration`) may load `.env` with `t.Cleanup` & **zero secret logging**.
+  - **`.env.prod` is strictly off-limits**: Never read, source, modify, or target it unless asked in this turn.
+- **Git & releases**:
+  - No unrequested `git commit`, `git push`, `git tag`, or destructive git ops.
+  - Any `v*` tag triggers `.github/workflows/release.yml`.
+  - Commits (when asked): <72-char subject, *why* body, separate `internal/` codegen commits, clean `git status`.
+- **PR review**:
+  - Check races, goroutine/stream/`Body` leaks, `ctx` cancellation, header isolation, `ProtoJSON`/pagination/zero-fallback.
+  - Verify `versions.go` gates, `e2b.Error` parity, and `internal/transport/` lint issues; skip style nits.

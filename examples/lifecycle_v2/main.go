@@ -1,10 +1,20 @@
-// Lifecycle example for self-hosted E2B control planes that predate the
-// /v3/templates endpoint (≤ 2.1.x). Identical to ../lifecycle but calls the
-// V2 build methods; SetPublicV1 is exercised in place of SetPublic because
-// PATCH /v2/templates/{id} does not exist on 2.1.x either.
+// Lifecycle example for self-hosted E2B control planes (required on
+// runtime < 2025.44 and still actively served across all self-hosted
+// runtime <= 2026.30; note that POST /v2/templates is retired with 410 Gone on
+// E2B Cloud, whereas ListV1, SetPublicV1, and CreateV1 are soft-deprecated in
+// OpenAPI and remain served on both self-hosted and E2B Cloud).
+//
+// Compared with ../lifecycle (which targets E2B Cloud), this example
+// uses the legacy endpoints required on older self-hosted servers:
+//   - cli.ListV1          (GET /templates, required on runtime < 2026.26)
+//   - cli.BuildStreamV2   (POST /v2/templates, required on runtime < 2025.44)
+//   - cli.SetPublicV1     (PATCH /templates/{id}, required on runtime < 2026.05)
+//   - client.CreateV1     (POST /sandboxes, required on runtime <= 2026.30)
 //
 // Usage:
 //
+//	# On early self-hosted clusters (< 2025.44), set both E2B_API_KEY (used by
+//	# BuildStreamV2) and E2B_ACCESS_TOKEN (used by ListV1 / SetPublicV1 / Delete).
 //	source ./.env && go run ./examples/lifecycle_v2
 package main
 
@@ -27,7 +37,7 @@ func main() {
 		log.Fatalf("template client: %v", err)
 	}
 
-	existing, err := cli.List(ctx, template.ListOptions{})
+	existing, err := cli.ListV1(ctx, template.ListOptions{})
 	if err != nil {
 		log.Fatalf("list templates: %v", err)
 	}
@@ -100,12 +110,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("client: %v", err)
 	}
-	sbx, err := client.Create(ctx, e2b.CreateOptions{
+	sbx, err := client.CreateV1(ctx, e2b.CreateOptions{
 		Template: info.TemplateID,
 		Timeout:  5 * time.Minute,
 	})
 	if err != nil {
-		log.Fatalf("create sandbox: %v", err)
+		log.Fatalf("create sandbox v1: %v", err)
 	}
 	defer func() {
 		killCtx, killCancel := context.WithTimeout(context.Background(), 30*time.Second)

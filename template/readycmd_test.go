@@ -14,8 +14,21 @@ func TestWaitForPort(t *testing.T) {
 
 func TestWaitForPort80(t *testing.T) {
 	got := WaitForPort(80).Cmd()
-	if !strings.Contains(got, ":80") {
-		t.Fatalf("expected port 80, got %q", got)
+	want := `[ -n "$(ss -Htuln sport = :80)" ]`
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestWaitForSafeShellQuoting(t *testing.T) {
+	if got := WaitForFile("/tmp/my file; evil").Cmd(); got != "[ -f '/tmp/my file; evil' ]" {
+		t.Fatalf("WaitForFile quote: %q", got)
+	}
+	if got := WaitForProcess("my proc").Cmd(); got != "pgrep 'my proc' > /dev/null" {
+		t.Fatalf("WaitForProcess quote: %q", got)
+	}
+	if got := WaitForURL("http://localhost/h?a=1&b=2", 200).Cmd(); !strings.Contains(got, "'http://localhost/h?a=1&b=2'") {
+		t.Fatalf("WaitForURL quote: %q", got)
 	}
 }
 

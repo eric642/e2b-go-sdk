@@ -6,10 +6,6 @@ import (
 	"testing"
 )
 
-// Each concrete error type must satisfy the sentinel Error interface so
-// callers can errors.As(err, &e2b.Error). baseError is the shared marker, so
-// if this list ever falls out of sync with errors.go the type system will
-// catch it.
 func TestErrorInterfaceMembership(t *testing.T) {
 	cases := []struct {
 		name string
@@ -27,6 +23,7 @@ func TestErrorInterfaceMembership(t *testing.T) {
 		{"GitUpstreamError", &GitUpstreamError{Message: "x"}},
 		{"TemplateError", &TemplateError{Message: "x"}},
 		{"RateLimitError", &RateLimitError{Message: "x"}},
+		{"ConflictError", &ConflictError{Message: "x"}},
 		{"BuildError", &BuildError{Message: "x"}},
 		{"FileUploadError", &FileUploadError{Path: "/p", Message: "x"}},
 		{"VolumeError", &VolumeError{Message: "x"}},
@@ -38,7 +35,6 @@ func TestErrorInterfaceMembership(t *testing.T) {
 			if !errors.As(tc.e, &generic) {
 				t.Fatalf("%T should satisfy Error", tc.e)
 			}
-			// .Error() must not panic or return empty.
 			if tc.e.Error() == "" {
 				t.Fatalf("%T.Error() returned empty string", tc.e)
 			}
@@ -148,5 +144,36 @@ func TestErrNotImplemented(t *testing.T) {
 	}
 	if !strings.Contains(ErrNotImplemented.Error(), "not implemented") {
 		t.Fatalf("unexpected message: %q", ErrNotImplemented.Error())
+	}
+}
+
+type externalError struct {
+	BaseError
+	msg string
+}
+
+func (e *externalError) Error() string { return e.msg }
+
+func TestBaseErrorEmbeddingSatisfiesError(t *testing.T) {
+	var err error = &externalError{BaseError: BaseError{StatusCode: 409, Code: "conflict_code"}, msg: "boom"}
+	if _, ok := errors.AsType[Error](err); !ok {
+		t.Fatal("type embedding BaseError should satisfy e2b.Error")
+	}
+	coder, ok := err.(interface {
+		ErrorCode() string
+		HTTPStatus() int
+	})
+	if !ok || coder.ErrorCode() != "conflict_code" || coder.HTTPStatus() != 409 {
+		t.Fatalf("BaseError accessors not promoted: %v", err)
+	}
+}
+
+func TestConflictErrorMessage(t *testing.T) {
+	e := &ConflictError{BaseError: BaseError{Code: "idempotency_in_progress"}, Message: "busy"}
+	if e.Error() != "e2b: conflict: busy" {
+		t.Fatalf("got %q", e.Error())
+	}
+	if e.Code != "idempotency_in_progress" {
+		t.Fatalf("Code=%q", e.Code)
 	}
 }

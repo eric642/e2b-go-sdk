@@ -1,14 +1,10 @@
 package transport
 
 import (
-	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
-
-	"connectrpc.com/connect"
 )
 
 func TestReadHTTPErrorParsesJSON(t *testing.T) {
@@ -22,6 +18,32 @@ func TestReadHTTPErrorParsesJSON(t *testing.T) {
 	}
 	if e.Message != "bad" {
 		t.Fatalf("Message: %q", e.Message)
+	}
+}
+
+func TestReadHTTPErrorParsesErrorCode(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: 503,
+		Body:       io.NopCloser(strings.NewReader(`{"code":503,"error_code":"sandbox_capacity_unavailable","message":"no capacity"}`)),
+	}
+	e := ReadHTTPError(resp)
+	if e.Code != "sandbox_capacity_unavailable" || e.Message != "no capacity" {
+		t.Fatalf("got %+v", e)
+	}
+}
+
+func TestReadHTTPErrorNilBody(t *testing.T) {
+	e := ReadHTTPError(&http.Response{StatusCode: 500})
+	if e.Status != 500 || e.Message != "" {
+		t.Fatalf("got %+v", e)
+	}
+}
+
+func TestReadHTTPErrorBoundsBody(t *testing.T) {
+	big := strings.Repeat("x", maxErrorBody+100)
+	e := ReadHTTPError(&http.Response{StatusCode: 500, Body: io.NopCloser(strings.NewReader(big))})
+	if len(e.Body) != maxErrorBody {
+		t.Fatalf("body len=%d, want %d", len(e.Body), maxErrorBody)
 	}
 }
 
@@ -45,7 +67,6 @@ func TestReadHTTPErrorEmptyBodyLeavesMessageBlank(t *testing.T) {
 	if e.Message != "" {
 		t.Fatalf("empty body should yield empty message, got %q", e.Message)
 	}
-	// Error() must still include the status.
 	if !strings.Contains(e.Error(), "http 500") {
 		t.Fatalf("Error()=%q", e.Error())
 	}
@@ -59,38 +80,5 @@ func TestHTTPErrorErrorFormat(t *testing.T) {
 	e2 := &HTTPError{Status: 500}
 	if got := e2.Error(); got != "http 500" {
 		t.Fatalf("got %q", got)
-	}
-}
-
-func TestIsConnectCodeTrue(t *testing.T) {
-	err := connect.NewError(connect.CodeNotFound, errors.New("missing"))
-	if !IsConnectCode(err, connect.CodeNotFound) {
-		t.Fatal("IsConnectCode should match")
-	}
-}
-
-func TestIsConnectCodeWrapped(t *testing.T) {
-	err := fmt.Errorf("context: %w", connect.NewError(connect.CodeUnauthenticated, errors.New("x")))
-	if !IsConnectCode(err, connect.CodeUnauthenticated) {
-		t.Fatal("IsConnectCode should see through wrap")
-	}
-}
-
-func TestIsConnectCodeFalseForPlainError(t *testing.T) {
-	if IsConnectCode(errors.New("plain"), connect.CodeNotFound) {
-		t.Fatal("plain error should not match any connect code")
-	}
-}
-
-func TestConnectCode(t *testing.T) {
-	err := connect.NewError(connect.CodeResourceExhausted, errors.New("limit"))
-	if code := ConnectCode(err); code != connect.CodeResourceExhausted {
-		t.Fatalf("code: %v", code)
-	}
-	if code := ConnectCode(errors.New("plain")); code != connect.CodeUnknown {
-		t.Fatalf("plain error should return CodeUnknown, got %v", code)
-	}
-	if code := ConnectCode(nil); code != connect.CodeUnknown {
-		t.Fatalf("nil should return CodeUnknown, got %v", code)
 	}
 }

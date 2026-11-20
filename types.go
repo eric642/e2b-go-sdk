@@ -1,7 +1,7 @@
 package e2b
 
 import (
-	"net/url"
+	"maps"
 	"time"
 
 	apiclient "github.com/eric642/e2b-go-sdk/internal/api"
@@ -17,23 +17,25 @@ const (
 
 // SandboxInfo holds REST-reported metadata about a sandbox.
 type SandboxInfo struct {
-	SandboxID           string
-	Alias               string
-	Domain              string
-	TemplateID          string
-	State               SandboxState
-	CPUCount            int32
-	MemoryMB            int32
-	DiskSizeMB          int32
-	StartedAt           time.Time
-	EndAt               time.Time
-	Metadata            map[string]string
-	EnvdVersion         string
-	EnvdAccessToken     string
-	AllowInternetAccess *bool
-	Network             *NetworkOptions
-	Lifecycle           *LifecycleOptions
-	VolumeMounts        []VolumeMount
+	SandboxID               string
+	Alias                   string
+	Domain                  string
+	TemplateID              string
+	State                   SandboxState
+	PauseMode               string
+	EnvdUnresponsiveAtPause bool
+	CPUCount                int32
+	MemoryMB                int32
+	DiskSizeMB              int32
+	StartedAt               time.Time
+	EndAt                   time.Time
+	Metadata                map[string]string
+	EnvdVersion             string
+	EnvdAccessToken         string
+	AllowInternetAccess     *bool
+	Network                 *SandboxNetworkInfo
+	Lifecycle               *LifecycleOptions
+	VolumeMounts            []VolumeMount
 }
 
 // MetricsOptions filters Sandbox.GetMetrics to a time window. Both bounds are
@@ -53,6 +55,7 @@ type SandboxMetric struct {
 	DiskUsed      int64
 	MemTotal      int64
 	MemUsed       int64
+	MemCache      int64
 	Timestamp     time.Time
 	TimestampUnix int64
 }
@@ -73,7 +76,7 @@ type ProcessInfo struct {
 	Tag  string
 }
 
-// EntryInfo is the metadata for a file or directory.
+// EntryInfo is the metadata for a file, directory, or symlink.
 type EntryInfo struct {
 	Name          string
 	Path          string
@@ -85,21 +88,42 @@ type EntryInfo struct {
 	Group         string
 	ModifiedTime  time.Time
 	SymlinkTarget string
+	Metadata      map[string]string
 }
 
-// EntryType distinguishes file entries from directories.
+// EntryType distinguishes file, directory, and symlink entries.
 type EntryType int
 
 const (
 	EntryTypeUnspecified EntryType = iota
 	EntryTypeFile
 	EntryTypeDirectory
+	EntryTypeSymlink
 )
 
-// FilesystemEvent is one event emitted by Filesystem.Watch.
+// String returns the canonical string name of the entry type ("file",
+// "directory", "symlink", or "" when unspecified).
+func (t EntryType) String() string {
+	switch t {
+	case EntryTypeFile:
+		return "file"
+	case EntryTypeDirectory:
+		return "directory"
+	case EntryTypeSymlink:
+		return "symlink"
+	default:
+		return ""
+	}
+}
+
+// FilesystemEvent is one event emitted by Filesystem.Watch or
+// Filesystem.WatchWithOptions.
 type FilesystemEvent struct {
 	Name string
 	Type FilesystemEventType
+	// Entry carries metadata for the affected path when WatchOptions.IncludeEntry
+	// is true (envd >= v0.6.3) and the entry still exists on disk.
+	Entry *EntryInfo
 }
 
 // FilesystemEventType enumerates filesystem event kinds.
@@ -114,11 +138,13 @@ const (
 	FsEventChmod
 )
 
-// WriteInfo is returned by Filesystem.Write.
+// WriteInfo is returned by Filesystem.Write, WriteBytes, WriteString, and
+// WriteFiles.
 type WriteInfo struct {
-	Path string
-	Name string
-	Type EntryType
+	Path     string
+	Name     string
+	Type     EntryType
+	Metadata map[string]string
 }
 
 // WriteEntry is one file to write via Filesystem.WriteFiles.
@@ -130,11 +156,17 @@ type WriteEntry struct {
 }
 
 // sandboxInfoFromAPI converts the generated type into the public type.
+// Legacy servers (< 2025.31) returned the RunningSandbox schema without a
+// state field; an empty state on a 200 OK response is normalized to running.
 func sandboxInfoFromAPI(d *apiclient.SandboxDetail) *SandboxInfo {
+	state := SandboxState(d.State)
+	if state == "" {
+		state = SandboxStateRunning
+	}
 	info := &SandboxInfo{
 		SandboxID:   d.SandboxID,
 		TemplateID:  d.TemplateID,
-		State:       SandboxState(d.State),
+		State:       state,
 		CPUCount:    int32(d.CpuCount),
 		MemoryMB:    int32(d.MemoryMB),
 		DiskSizeMB:  int32(d.DiskSizeMB),
@@ -151,26 +183,21 @@ func sandboxInfoFromAPI(d *apiclient.SandboxDetail) *SandboxInfo {
 	if d.EnvdAccessToken != nil {
 		info.EnvdAccessToken = *d.EnvdAccessToken
 	}
+	if d.PauseMode != nil {
+		info.PauseMode = string(*d.PauseMode)
+	}
+	if d.EnvdUnresponsiveAtPause != nil {
+		info.EnvdUnresponsiveAtPause = *d.EnvdUnresponsiveAtPause
+	}
 	if d.AllowInternetAccess != nil {
-		info.AllowInternetAccess = d.AllowInternetAccess
+		allow := *d.AllowInternetAccess
+		info.AllowInternetAccess = &allow
 	}
 	if d.Metadata != nil {
-		info.Metadata = map[string]string(*d.Metadata)
+		info.Metadata = maps.Clone(map[string]string(*d.Metadata))
 	}
 	if d.Network != nil {
-		info.Network = &NetworkOptions{}
-		if d.Network.AllowOut != nil {
-			info.Network.AllowOut = *d.Network.AllowOut
-		}
-		if d.Network.DenyOut != nil {
-			info.Network.DenyOut = *d.Network.DenyOut
-		}
-		if d.Network.AllowPublicTraffic != nil {
-			info.Network.AllowPublicTraffic = *d.Network.AllowPublicTraffic
-		}
-		if d.Network.MaskRequestHost != nil {
-			info.Network.MaskRequestHost = *d.Network.MaskRequestHost
-		}
+		info.Network = networkInfoFromAPI(d.Network)
 	}
 	if d.Lifecycle != nil {
 		info.Lifecycle = &LifecycleOptions{
@@ -188,13 +215,19 @@ func sandboxInfoFromAPI(d *apiclient.SandboxDetail) *SandboxInfo {
 
 // sandboxInfoFromListed converts a ListedSandbox (returned by the list
 // endpoint) into the public type. ListedSandbox carries fewer fields than
-// SandboxDetail, so Domain, EnvdAccessToken, AllowInternetAccess, Network and
-// Lifecycle are left zero — call GetInfo for the full record.
+// SandboxDetail, so Domain, EnvdAccessToken, AllowInternetAccess, Network,
+// PauseMode, and Lifecycle are left zero — call GetInfo for the full record.
+// Legacy v1 GET /sandboxes responses omit state (always running), so empty
+// state is normalized to SandboxStateRunning.
 func sandboxInfoFromListed(d *apiclient.ListedSandbox) *SandboxInfo {
+	state := SandboxState(d.State)
+	if state == "" {
+		state = SandboxStateRunning
+	}
 	info := &SandboxInfo{
 		SandboxID:   d.SandboxID,
 		TemplateID:  d.TemplateID,
-		State:       SandboxState(d.State),
+		State:       state,
 		CPUCount:    int32(d.CpuCount),
 		MemoryMB:    int32(d.MemoryMB),
 		DiskSizeMB:  int32(d.DiskSizeMB),
@@ -205,8 +238,11 @@ func sandboxInfoFromListed(d *apiclient.ListedSandbox) *SandboxInfo {
 	if d.Alias != nil {
 		info.Alias = *d.Alias
 	}
+	if d.EnvdUnresponsiveAtPause != nil {
+		info.EnvdUnresponsiveAtPause = *d.EnvdUnresponsiveAtPause
+	}
 	if d.Metadata != nil {
-		info.Metadata = map[string]string(*d.Metadata)
+		info.Metadata = maps.Clone(map[string]string(*d.Metadata))
 	}
 	if d.VolumeMounts != nil {
 		for _, m := range *d.VolumeMounts {
@@ -215,5 +251,3 @@ func sandboxInfoFromListed(d *apiclient.ListedSandbox) *SandboxInfo {
 	}
 	return info
 }
-
-func urlEscape(s string) string { return url.QueryEscape(s) }

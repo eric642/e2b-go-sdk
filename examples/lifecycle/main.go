@@ -1,5 +1,10 @@
-// Lifecycle example: list templates, build a new one, inspect it, spawn a
-// sandbox from it, read sandbox info, then tear everything down.
+// Lifecycle example (E2B Cloud): list templates, build a new one via
+// POST /v3/templates, inspect it, spawn a sandbox via POST /v2/sandboxes, read
+// sandbox info, then tear everything down.
+//
+// For self-hosted E2B deployments (runtime <= 2026.30, including < 2025.44), see
+// ../lifecycle_v2 and ../selfhosted which use CreateV1 / BuildStreamV2 /
+// SetPublicV1.
 //
 // Usage:
 //
@@ -25,8 +30,7 @@ func main() {
 		log.Fatalf("template client: %v", err)
 	}
 
-	// 1) List existing templates.
-	existing, err := cli.List(ctx, template.ListOptions{})
+	existing, err := cli.ListAllV2(ctx, template.ListV2Options{})
 	if err != nil {
 		log.Fatalf("list templates: %v", err)
 	}
@@ -43,7 +47,6 @@ func main() {
 			t.CreatedAt.Format(time.RFC3339))
 	}
 
-	// 2) Build a new template.
 	name := fmt.Sprintf("go-sdk-lifecycle-demo-%d", time.Now().Unix())
 	tpl := template.New().
 		FromDebianImage("bookworm").
@@ -70,7 +73,6 @@ func main() {
 	}
 	fmt.Printf("\ntemplate built: id=%s build=%s\n", info.TemplateID, info.BuildID)
 
-	// Make sure the template is removed even if later steps fail.
 	defer func() {
 		deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer deleteCancel()
@@ -81,7 +83,6 @@ func main() {
 		fmt.Printf("template deleted: %s\n", info.TemplateID)
 	}()
 
-	// 3) Inspect the freshly built template.
 	detail, err := cli.Get(ctx, info.TemplateID, template.GetOptions{Limit: 5})
 	if err != nil {
 		log.Fatalf("get template: %v", err)
@@ -93,7 +94,6 @@ func main() {
 			b.BuildID, b.Status, b.CPUCount, b.MemoryMB, b.CreatedAt.Format(time.RFC3339))
 	}
 
-	// 4) Start a sandbox from the template.
 	client, err := e2b.NewClient(e2b.Config{})
 	if err != nil {
 		log.Fatalf("client: %v", err)
@@ -105,7 +105,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("create sandbox: %v", err)
 	}
-	// Kill runs before the template-delete defer thanks to LIFO ordering.
 	defer func() {
 		killCtx, killCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer killCancel()
@@ -117,7 +116,6 @@ func main() {
 	}()
 	fmt.Printf("sandbox started: id=%s\n", sbx.ID)
 
-	// 5) Read sandbox info.
 	si, err := sbx.GetInfo(ctx)
 	if err != nil {
 		log.Fatalf("sandbox info: %v", err)

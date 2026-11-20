@@ -11,30 +11,47 @@ import (
 	fspb "github.com/eric642/e2b-go-sdk/internal/envd/filesystem"
 )
 
-// WatchHandle streams filesystem events from Filesystem.Watch.
+// WatchHandle streams filesystem events from Filesystem.Watch and
+// Filesystem.WatchWithOptions.
 type WatchHandle struct {
-	events chan FilesystemEvent
-	done   chan struct{}
-	cancel context.CancelFunc
+	ctx        context.Context
+	events     chan FilesystemEvent
+	done       chan struct{}
+	cancel     context.CancelFunc
+	cancelOnce sync.Once
 
-	mu  sync.Mutex
-	err error
+	mu      sync.Mutex
+	stopped bool
+	err     error
+}
+
+func (w *WatchHandle) invokeCancel() {
+	w.cancelOnce.Do(func() {
+		if w.cancel != nil {
+			w.cancel()
+		}
+	})
 }
 
 // Events returns a receive-only channel that yields filesystem events. The
 // channel is closed when the watch ends; check Err() afterwards.
 func (w *WatchHandle) Events() <-chan FilesystemEvent { return w.events }
 
-// Err returns the error (if any) that terminated the watch.
+// Err returns the error (if any) that terminated the watch. Returns nil after
+// a clean Stop.
 func (w *WatchHandle) Err() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.err
 }
 
-// Stop cancels the watch and waits for the background goroutine to finish.
+// Stop cancels the watch stream locally and waits for the background goroutine
+// to finish. Calling Stop multiple times is safe.
 func (w *WatchHandle) Stop(ctx context.Context) error {
-	w.cancel()
+	w.mu.Lock()
+	w.stopped = true
+	w.mu.Unlock()
+	w.invokeCancel()
 	select {
 	case <-w.done:
 		return nil
@@ -43,9 +60,9 @@ func (w *WatchHandle) Stop(ctx context.Context) error {
 	}
 }
 
-// consume drains the Connect server stream. It closes events and done when
-// the stream terminates.
 func (w *WatchHandle) consume(stream *connect.ServerStreamForClient[fspb.WatchDirResponse]) {
+	defer w.invokeCancel()
+	defer func() { _ = stream.Close() }()
 	defer close(w.events)
 	defer close(w.done)
 	for stream.Receive() {
@@ -55,17 +72,33 @@ func (w *WatchHandle) consume(stream *connect.ServerStreamForClient[fspb.WatchDi
 		}
 		switch ev := msg.Event.(type) {
 		case *fspb.WatchDirResponse_Filesystem:
-			w.events <- FilesystemEvent{
+			if ev.Filesystem == nil {
+				continue
+			}
+			out := FilesystemEvent{
 				Name: ev.Filesystem.GetName(),
 				Type: fsEventFromPB(ev.Filesystem.GetType()),
 			}
+			if ev.Filesystem.Entry != nil {
+				out.Entry = entryInfoFromPB(ev.Filesystem.Entry)
+			}
+			if w.ctx != nil {
+				select {
+				case w.events <- out:
+				case <-w.ctx.Done():
+					return
+				}
+			} else {
+				w.events <- out
+			}
 		case *fspb.WatchDirResponse_Start, *fspb.WatchDirResponse_Keepalive:
-			// ignore
 		}
 	}
 	if err := stream.Err(); err != nil && !errors.Is(err, io.EOF) {
 		w.mu.Lock()
-		w.err = mapConnectErr(err)
+		if !w.stopped {
+			w.err = mapConnectErr(err)
+		}
 		w.mu.Unlock()
 	}
 }

@@ -35,7 +35,8 @@ type LogEntryEnd struct {
 	OK    bool
 }
 
-// DefaultLogger returns a function that prints log entries to stderr.
+// DefaultLogger returns a function that prints log entries to w (or os.Stderr
+// when w is nil). Suitable for BuildOptions.OnBuildLogs.
 func DefaultLogger(w io.Writer) func(LogEntry) {
 	if w == nil {
 		w = os.Stderr

@@ -1,6 +1,7 @@
 package template
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,88 +13,108 @@ import (
 
 const (
 	defaultPollInterval = 200 * time.Millisecond
-	defaultCPU          = 2
-	defaultMemoryMB     = 1024
 	buildEventBuffer    = 16
 	logTailLimit        = 20
 )
 
 // BuildOptions captures every caller-tunable parameter of a template build.
 type BuildOptions struct {
-	Name         string
-	Tags         []string
-	CPUCount     int32
-	MemoryMB     int32
-	SkipCache    bool
+	// Name is the template name (or "name:tag" on Build v3). Required.
+	Name string
+	// Tags assigns additional tags during Build v3 (unsupported on BuildV2).
+	Tags []string
+	// CPUCount sets the sandbox vCPU count. Leave 0 to use the server/tier default.
+	CPUCount int32
+	// MaxCPUCount sets the maximum vCPU count for resizable templates (Build v3 only).
+	MaxCPUCount *int32
+	// MemoryMB sets the sandbox RAM in MiB. Leave 0 to use the server/tier default.
+	MemoryMB int32
+	// MinFreeDiskMB requests minimum free disk space in MiB after build steps (Build v3 only).
+	MinFreeDiskMB *int32
+	// SkipCache forces the entire template build to run without cache.
+	SkipCache bool
+	// PollInterval sets how frequently Build / BuildStream poll build status.
+	// Defaults to 200ms when <= 0.
 	PollInterval time.Duration
+	// IdempotencyKey is an optional key (1..255 lowercase ASCII letters, digits,
+	// or hyphens) sent as the Idempotency-Key header on POST /v3/templates and
+	// POST /v2/templates/{id}/builds/{buildID} (unless TriggerIdempotencyKey
+	// overrides the build-trigger step).
+	IdempotencyKey string
+	// TriggerIdempotencyKey optionally overrides the Idempotency-Key header sent
+	// specifically on POST /v2/templates/{id}/builds/{buildID} when a deployment
+	// enforces team-scoped idempotency across both build-create and build-start.
+	TriggerIdempotencyKey string
+	// OnBuildLogs, when non-nil, is invoked sequentially for every build log
+	// entry observed while polling in Build, BuildStream, BuildV2, or BuildStreamV2.
+	OnBuildLogs func(LogEntry)
 }
 
-// Build runs a server-side template build to completion. Logs are discarded;
-// for streaming use BuildStream. Returns the completed BuildInfo or the
-// first error that terminates the build.
+// Build runs a server-side v3 template build to completion. When
+// opts.OnBuildLogs is set, each live log entry is forwarded to it before Build
+// returns; for channel-based streaming use BuildStream.
+//
+// Endpoint: POST /v3/templates, GET /templates/{templateID}/files/{hash}, PUT <presigned-url>, POST /v2/templates/{templateID}/builds/{buildID}, GET /templates/{templateID}/builds/{buildID}/status
+// Compatibility: E2B Cloud; self-hosted runtime 2025.44..2026.30 (use BuildV2 on < 2025.44).
 func (c *Client) Build(ctx context.Context, b *Builder, opts BuildOptions) (*BuildInfo, error) {
 	ch, err := c.BuildStream(ctx, b, opts)
 	if err != nil {
 		return nil, err
 	}
-	var done *BuildInfo
-	for ev := range ch {
-		if ev.Err != nil {
-			return nil, ev.Err
-		}
-		if ev.Done != nil {
-			done = ev.Done
-		}
-	}
-	if done == nil {
-		return nil, &BuildError{Op: "poll", Err: errors.New("channel closed without terminal event")}
-	}
-	return done, nil
+	return awaitBuildStream(ctx, ch)
 }
 
-// BuildStream kicks off a build and returns a channel of BuildEvents. The
-// channel closes after emitting a terminal Done or Err event.
+// BuildStream kicks off a v3 template build and returns a channel of
+// BuildEvents. The channel closes after emitting a terminal Done or Err event.
+//
+// Endpoint: POST /v3/templates, GET /templates/{templateID}/files/{hash}, PUT <presigned-url>, POST /v2/templates/{templateID}/builds/{buildID}, GET /templates/{templateID}/builds/{buildID}/status
+// Compatibility: E2B Cloud; self-hosted runtime 2025.44..2026.30 (use BuildStreamV2 on < 2025.44).
 func (c *Client) BuildStream(ctx context.Context, b *Builder, opts BuildOptions) (<-chan BuildEvent, error) {
-	info, _, err := c.startBuild(ctx, b, opts)
+	info, err := c.startBuild(ctx, b, opts)
 	if err != nil {
 		return nil, err
 	}
 	return c.streamBuild(ctx, info, opts), nil
 }
 
-// BuildInBackground kicks off a build without polling for completion. The
-// caller can poll via GetBuildStatus using the returned BuildInfo.
+// BuildInBackground kicks off a v3 template build without polling for
+// completion. Poll progress via GetBuildStatus using the returned BuildInfo.
+//
+// Endpoint: POST /v3/templates, GET /templates/{templateID}/files/{hash}, PUT <presigned-url>, POST /v2/templates/{templateID}/builds/{buildID}
+// Compatibility: E2B Cloud; self-hosted runtime 2025.44..2026.30 (use BuildInBackgroundV2 on < 2025.44).
 func (c *Client) BuildInBackground(ctx context.Context, b *Builder, opts BuildOptions) (*BuildInfo, error) {
-	info, _, err := c.startBuild(ctx, b, opts)
-	return info, err
+	return c.startBuild(ctx, b, opts)
 }
 
-// BuildV2 is the POST /v2/templates counterpart of Build, intended for
-// self-hosted E2B deployments that predate /v3/templates (≤ 2.1.x). The v2
-// request body has no tags field; BuildOptions.Tags must be empty.
+// BuildV2 is the POST /v2/templates counterpart of Build. Tags, MaxCPUCount,
+// and MinFreeDiskMB are not supported by the v2 request schema and must be unset.
+//
+// Unlike soft-deprecated v1 routes that remain active, POST /v2/templates is
+// retired (returns 410 Gone) on E2B Cloud, while still actively served on
+// self-hosted runtime <= 2026.30. Use BuildV2 on self-hosted runtime < 2025.44
+// (where POST /v3/templates does not exist); use Build on E2B Cloud and
+// self-hosted runtime 2025.44..2026.30. Never falls back to POST /v3/templates.
+//
+// Endpoint: POST /v2/templates, GET /templates/{templateID}/files/{hash}, PUT <presigned-url>, POST /v2/templates/{templateID}/builds/{buildID}, GET /templates/{templateID}/builds/{buildID}/status
+// Compatibility: actively served on self-hosted runtime <= 2026.30 (required on < 2025.44); retired (410 Gone) on E2B Cloud — use Build instead.
 func (c *Client) BuildV2(ctx context.Context, b *Builder, opts BuildOptions) (*BuildInfo, error) {
 	ch, err := c.BuildStreamV2(ctx, b, opts)
 	if err != nil {
 		return nil, err
 	}
-	var done *BuildInfo
-	for ev := range ch {
-		if ev.Err != nil {
-			return nil, ev.Err
-		}
-		if ev.Done != nil {
-			done = ev.Done
-		}
-	}
-	if done == nil {
-		return nil, &BuildError{Op: "poll", Err: errors.New("channel closed without terminal event")}
-	}
-	return done, nil
+	return awaitBuildStream(ctx, ch)
 }
 
 // BuildStreamV2 is the POST /v2/templates counterpart of BuildStream.
+// POST /v2/templates is retired (returns 410 Gone) on E2B Cloud, while still
+// actively served on self-hosted runtime <= 2026.30 (and required on
+// self-hosted runtime < 2025.44 where POST /v3/templates does not exist).
+// Never falls back to POST /v3/templates.
+//
+// Endpoint: POST /v2/templates, GET /templates/{templateID}/files/{hash}, PUT <presigned-url>, POST /v2/templates/{templateID}/builds/{buildID}, GET /templates/{templateID}/builds/{buildID}/status
+// Compatibility: actively served on self-hosted runtime <= 2026.30 (required on < 2025.44); retired (410 Gone) on E2B Cloud — use BuildStream instead.
 func (c *Client) BuildStreamV2(ctx context.Context, b *Builder, opts BuildOptions) (<-chan BuildEvent, error) {
-	info, _, err := c.startBuildV2(ctx, b, opts)
+	info, err := c.startBuildV2(ctx, b, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -101,10 +122,34 @@ func (c *Client) BuildStreamV2(ctx context.Context, b *Builder, opts BuildOption
 }
 
 // BuildInBackgroundV2 is the POST /v2/templates counterpart of
-// BuildInBackground.
+// BuildInBackground. POST /v2/templates is retired (returns 410 Gone) on
+// E2B Cloud, while still actively served on self-hosted runtime <= 2026.30
+// (and required on self-hosted runtime < 2025.44 where POST /v3/templates does
+// not exist). Never falls back to POST /v3/templates.
+//
+// Endpoint: POST /v2/templates, GET /templates/{templateID}/files/{hash}, PUT <presigned-url>, POST /v2/templates/{templateID}/builds/{buildID}
+// Compatibility: actively served on self-hosted runtime <= 2026.30 (required on < 2025.44); retired (410 Gone) on E2B Cloud — use BuildInBackground instead.
 func (c *Client) BuildInBackgroundV2(ctx context.Context, b *Builder, opts BuildOptions) (*BuildInfo, error) {
-	info, _, err := c.startBuildV2(ctx, b, opts)
-	return info, err
+	return c.startBuildV2(ctx, b, opts)
+}
+
+func awaitBuildStream(ctx context.Context, ch <-chan BuildEvent) (*BuildInfo, error) {
+	var done *BuildInfo
+	for ev := range ch {
+		if ev.Err != nil {
+			return nil, ev.Err
+		}
+		if ev.Done != nil {
+			done = ev.Done
+		}
+	}
+	if done == nil {
+		if ctx.Err() != nil {
+			return nil, mapTransportErr(ctx.Err())
+		}
+		return nil, &BuildError{Op: "poll", Err: errors.New("channel closed without terminal event")}
+	}
+	return done, nil
 }
 
 func (c *Client) streamBuild(ctx context.Context, info *BuildInfo, opts BuildOptions) <-chan BuildEvent {
@@ -113,89 +158,221 @@ func (c *Client) streamBuild(ctx context.Context, info *BuildInfo, opts BuildOpt
 		interval = defaultPollInterval
 	}
 	events := make(chan BuildEvent, buildEventBuffer)
-	go c.pollUntilDone(ctx, info, interval, events)
+	go c.pollUntilDone(ctx, info, interval, opts.OnBuildLogs, events)
 	return events
 }
 
-// GetBuildStatus fetches the current status of an in-flight build.
+// GetBuildStatus fetches the current status and incremental log entries of an
+// in-flight or completed template build.
+//
+// Endpoint: GET /templates/{templateID}/builds/{buildID}/status
+// Compatibility: E2B Cloud; self-hosted runtime <= 2026.30.
 func (c *Client) GetBuildStatus(ctx context.Context, info BuildInfo, logsOffset int) (*BuildStatus, error) {
-	return c.getBuildStatus(ctx, info.TemplateID, info.BuildID, logsOffset)
+	return c.GetBuildStatusWithOptions(ctx, info, BuildStatusOptions{LogsOffset: logsOffset})
 }
 
-// startBuild performs validation, POST /v3/templates, file uploads, and the
-// trigger request. It returns once the build is accepted by the server.
-func (c *Client) startBuild(ctx context.Context, b *Builder, opts BuildOptions) (*BuildInfo, *apiclient.TemplateBuildStartV2, error) {
-	cpu, mem, err := validateBuildOpts(opts)
-	if err != nil {
-		return nil, nil, err
+// GetBuildStatusWithOptions fetches the current status of a template build
+// with optional log offset, limit, and minimum severity level filters.
+//
+// Endpoint: GET /templates/{templateID}/builds/{buildID}/status
+// Compatibility: E2B Cloud; self-hosted runtime <= 2026.30.
+func (c *Client) GetBuildStatusWithOptions(ctx context.Context, info BuildInfo, opts BuildStatusOptions) (*BuildStatus, error) {
+	return c.getBuildStatusWithOptions(ctx, info.TemplateID, info.BuildID, opts)
+}
+
+// Build delegates a finalized template build to c.Build without requiring a
+// manual f.Builder() unwrap.
+//
+// Endpoint: POST /v3/templates, GET /templates/{templateID}/files/{hash}, PUT <presigned-url>, POST /v2/templates/{templateID}/builds/{buildID}, GET /templates/{templateID}/builds/{buildID}/status
+// Compatibility: E2B Cloud; self-hosted runtime 2025.44..2026.30 (use BuildV2 on < 2025.44).
+func (f *FinalBuilder) Build(ctx context.Context, c *Client, opts BuildOptions) (*BuildInfo, error) {
+	return c.Build(ctx, f.b, opts)
+}
+
+// BuildStream delegates a finalized streaming template build to c.BuildStream.
+//
+// Endpoint: POST /v3/templates, GET /templates/{templateID}/files/{hash}, PUT <presigned-url>, POST /v2/templates/{templateID}/builds/{buildID}, GET /templates/{templateID}/builds/{buildID}/status
+// Compatibility: E2B Cloud; self-hosted runtime 2025.44..2026.30 (use BuildStreamV2 on < 2025.44).
+func (f *FinalBuilder) BuildStream(ctx context.Context, c *Client, opts BuildOptions) (<-chan BuildEvent, error) {
+	return c.BuildStream(ctx, f.b, opts)
+}
+
+// BuildInBackground delegates a finalized background template build to c.BuildInBackground.
+//
+// Endpoint: POST /v3/templates, GET /templates/{templateID}/files/{hash}, PUT <presigned-url>, POST /v2/templates/{templateID}/builds/{buildID}
+// Compatibility: E2B Cloud; self-hosted runtime 2025.44..2026.30 (use BuildInBackgroundV2 on < 2025.44).
+func (f *FinalBuilder) BuildInBackground(ctx context.Context, c *Client, opts BuildOptions) (*BuildInfo, error) {
+	return c.BuildInBackground(ctx, f.b, opts)
+}
+
+// BuildV2 delegates a finalized v2 template build to c.BuildV2.
+// POST /v2/templates is actively served on self-hosted runtime <= 2026.30
+// (required on < 2025.44) and retired (410 Gone) on E2B Cloud.
+//
+// Endpoint: POST /v2/templates, GET /templates/{templateID}/files/{hash}, PUT <presigned-url>, POST /v2/templates/{templateID}/builds/{buildID}, GET /templates/{templateID}/builds/{buildID}/status
+// Compatibility: actively served on self-hosted runtime <= 2026.30 (required on < 2025.44); retired (410 Gone) on E2B Cloud — use Build instead.
+func (f *FinalBuilder) BuildV2(ctx context.Context, c *Client, opts BuildOptions) (*BuildInfo, error) {
+	return c.BuildV2(ctx, f.b, opts)
+}
+
+// BuildStreamV2 delegates a finalized v2 streaming template build to c.BuildStreamV2.
+// POST /v2/templates is actively served on self-hosted runtime <= 2026.30
+// (required on < 2025.44) and retired (410 Gone) on E2B Cloud.
+//
+// Endpoint: POST /v2/templates, GET /templates/{templateID}/files/{hash}, PUT <presigned-url>, POST /v2/templates/{templateID}/builds/{buildID}, GET /templates/{templateID}/builds/{buildID}/status
+// Compatibility: actively served on self-hosted runtime <= 2026.30 (required on < 2025.44); retired (410 Gone) on E2B Cloud — use BuildStream instead.
+func (f *FinalBuilder) BuildStreamV2(ctx context.Context, c *Client, opts BuildOptions) (<-chan BuildEvent, error) {
+	return c.BuildStreamV2(ctx, f.b, opts)
+}
+
+// BuildInBackgroundV2 delegates a finalized v2 background build to c.BuildInBackgroundV2.
+// POST /v2/templates is actively served on self-hosted runtime <= 2026.30
+// (required on < 2025.44) and retired (410 Gone) on E2B Cloud.
+//
+// Endpoint: POST /v2/templates, GET /templates/{templateID}/files/{hash}, PUT <presigned-url>, POST /v2/templates/{templateID}/builds/{buildID}
+// Compatibility: actively served on self-hosted runtime <= 2026.30 (required on < 2025.44); retired (410 Gone) on E2B Cloud — use BuildInBackground instead.
+func (f *FinalBuilder) BuildInBackgroundV2(ctx context.Context, c *Client, opts BuildOptions) (*BuildInfo, error) {
+	return c.BuildInBackgroundV2(ctx, f.b, opts)
+}
+
+func (c *Client) startBuild(ctx context.Context, b *Builder, opts BuildOptions) (*BuildInfo, error) {
+	if b == nil {
+		return nil, &e2b.InvalidArgumentError{Message: "Builder must not be nil"}
 	}
-	reqResp, err := c.requestBuild(ctx, opts.Name, opts.Tags, cpu, mem)
-	if err != nil {
-		return nil, nil, err
+	if err := validateBuildOpts(opts); err != nil {
+		return nil, err
 	}
-	tagsOut := []string(nil)
+	steps, ignores, body, err := prepareBuild(b, opts.SkipCache)
+	if err != nil {
+		return nil, err
+	}
+	reqResp, err := c.requestBuildWithOptions(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	var tagsOut []string
 	if reqResp.Tags != nil {
-		tagsOut = append([]string{}, reqResp.Tags...)
+		tagsOut = append([]string(nil), reqResp.Tags...)
 	}
-	return c.finishStartBuild(ctx, b, opts, reqResp.TemplateID, reqResp.BuildID, tagsOut)
+	return c.finishStartBuild(ctx, b, opts, steps, ignores, body, reqResp.TemplateID, reqResp.BuildID, tagsOut)
 }
 
-// startBuildV2 is the POST /v2/templates counterpart of startBuild. Tags are
-// rejected — the v2 schema has no tags field.
-func (c *Client) startBuildV2(ctx context.Context, b *Builder, opts BuildOptions) (*BuildInfo, *apiclient.TemplateBuildStartV2, error) {
+func (c *Client) startBuildV2(ctx context.Context, b *Builder, opts BuildOptions) (*BuildInfo, error) {
+	if b == nil {
+		return nil, &e2b.InvalidArgumentError{Message: "Builder must not be nil"}
+	}
 	if len(opts.Tags) > 0 {
-		return nil, nil, &e2b.InvalidArgumentError{
+		return nil, &e2b.InvalidArgumentError{
 			Message: "BuildOptions.Tags is not supported by POST /v2/templates; use Build (v3) or drop Tags",
 		}
 	}
-	cpu, mem, err := validateBuildOpts(opts)
-	if err != nil {
-		return nil, nil, err
+	if opts.MaxCPUCount != nil {
+		return nil, &e2b.InvalidArgumentError{
+			Message: "BuildOptions.MaxCPUCount is not supported by POST /v2/templates; use Build (v3) or drop MaxCPUCount",
+		}
 	}
-	reqResp, err := c.requestBuildV2(ctx, opts.Name, cpu, mem)
-	if err != nil {
-		return nil, nil, err
+	if opts.MinFreeDiskMB != nil {
+		return nil, &e2b.InvalidArgumentError{
+			Message: "BuildOptions.MinFreeDiskMB is not supported by POST /v2/templates; use Build (v3) or drop MinFreeDiskMB",
+		}
 	}
-	return c.finishStartBuild(ctx, b, opts, reqResp.TemplateID, reqResp.BuildID, nil)
+	if err := validateBuildOpts(opts); err != nil {
+		return nil, err
+	}
+	steps, ignores, body, err := prepareBuild(b, opts.SkipCache)
+	if err != nil {
+		return nil, err
+	}
+	reqResp, err := c.requestBuildV2(ctx, opts.Name, opts.CPUCount, opts.MemoryMB)
+	if err != nil {
+		return nil, err
+	}
+	return c.finishStartBuild(ctx, b, opts, steps, ignores, body, reqResp.TemplateID, reqResp.BuildID, nil)
 }
 
-func validateBuildOpts(opts BuildOptions) (cpu, mem int32, err error) {
+func prepareBuild(b *Builder, skipCache bool) ([]instruction, []string, *apiclient.TemplateBuildStartV2, error) {
+	if b.err != nil {
+		return nil, nil, nil, b.err
+	}
+	ignores := b.combinedIgnores()
+	steps, err := b.instructionsWithHashesWithIgnores(ignores)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	body, err := b.serializeSteps(steps, skipCache)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return steps, ignores, body, nil
+}
+
+func validateBuildOpts(opts BuildOptions) error {
 	if opts.Name == "" {
-		return 0, 0, &e2b.InvalidArgumentError{Message: "BuildOptions.Name is required"}
+		return &e2b.InvalidArgumentError{Message: "BuildOptions.Name is required"}
 	}
-	cpu = opts.CPUCount
-	if cpu == 0 {
-		cpu = defaultCPU
+	if opts.CPUCount < 0 {
+		return &e2b.InvalidArgumentError{Message: "BuildOptions.CPUCount must be >= 0"}
 	}
-	mem = opts.MemoryMB
-	if mem == 0 {
-		mem = defaultMemoryMB
+	if opts.MemoryMB < 0 {
+		return &e2b.InvalidArgumentError{Message: "BuildOptions.MemoryMB must be >= 0"}
 	}
-	return cpu, mem, nil
+	if opts.MaxCPUCount != nil {
+		if *opts.MaxCPUCount <= 0 {
+			return &e2b.InvalidArgumentError{Message: "BuildOptions.MaxCPUCount must be > 0"}
+		}
+		if opts.CPUCount > 0 && *opts.MaxCPUCount < opts.CPUCount {
+			return &e2b.InvalidArgumentError{Message: "BuildOptions.MaxCPUCount must be >= CPUCount"}
+		}
+	}
+	if opts.MinFreeDiskMB != nil && *opts.MinFreeDiskMB < 0 {
+		return &e2b.InvalidArgumentError{Message: "BuildOptions.MinFreeDiskMB must be >= 0"}
+	}
+	if err := validateIdempotencyKey(opts.IdempotencyKey); err != nil {
+		return err
+	}
+	if err := validateIdempotencyKey(opts.TriggerIdempotencyKey); err != nil {
+		return err
+	}
+	return nil
 }
 
-// finishStartBuild runs the version-agnostic tail of startBuild*: per-COPY
-// cache probes and uploads, serialize the step list, and trigger the build
-// via POST /v2/templates/{id}/builds/{buildID}.
-func (c *Client) finishStartBuild(ctx context.Context, b *Builder, opts BuildOptions, templateID, buildID string, tags []string) (*BuildInfo, *apiclient.TemplateBuildStartV2, error) {
-	steps, err := b.instructionsWithHashes()
-	if err != nil {
-		return nil, nil, err
+func validateIdempotencyKey(key string) error {
+	if key == "" {
+		return nil
 	}
+	if len(key) > 255 {
+		return &e2b.InvalidArgumentError{
+			Message: fmt.Sprintf("invalid IdempotencyKey: expected 1..255 characters, got %d", len(key)),
+		}
+	}
+	for i := range len(key) {
+		c := key[i]
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+			return &e2b.InvalidArgumentError{
+				Message: "invalid IdempotencyKey: only lowercase ASCII letters (a-z), digits (0-9), and hyphens (-) are allowed",
+			}
+		}
+	}
+	return nil
+}
 
-	// Per-COPY: check cache, upload if miss/forceUpload.
+func (c *Client) finishStartBuild(ctx context.Context, b *Builder, opts BuildOptions, steps []instruction, ignores []string, body *apiclient.TemplateBuildStartV2, templateID, buildID string, tags []string) (*BuildInfo, error) {
 	for _, s := range steps {
 		if s.Type != instTypeCopy {
 			continue
 		}
+		src := s.Args[0]
 		link, err := c.getFileUploadLink(ctx, templateID, s.FilesHash)
 		if err != nil {
-			return nil, nil, err
+			if ue, ok := errors.AsType[*UploadError](err); ok && ue.Src == "" {
+				ue.Src = src
+			}
+			return nil, err
 		}
 		needsUpload := !link.Present || (s.HasForceUpload && s.ForceUpload)
 		if needsUpload && link.Url == nil {
-			return nil, nil, &UploadError{
-				Src:  s.Args[0],
+			return nil, &UploadError{
+				Src:  src,
 				Hash: s.FilesHash,
 				Err:  fmt.Errorf("server reported present=false but returned no upload URL"),
 			}
@@ -207,30 +384,30 @@ func (c *Client) finishStartBuild(ctx context.Context, b *Builder, opts BuildOpt
 		if s.ResolveSymlinks != nil {
 			resolve = *s.ResolveSymlinks
 		}
-		ignores := append([]string(nil), b.ignorePatterns...)
-		if b.contextDir != "" {
-			ignores = append(ignores, readDockerignore(b.contextDir)...)
+		archiveBytes, err := tarFileBytes(src, b.contextDir, ignores, resolve)
+		if err != nil {
+			return nil, &UploadError{Src: src, Hash: s.FilesHash, Err: err}
 		}
-		src := s.Args[0]
-		tarR, errc := tarFileStream(src, b.contextDir, ignores, resolve)
-		if err := c.uploadFile(ctx, *link.Url, tarR); err != nil {
-			tarR.Close()
-			// Drain producer before returning so the goroutine exits.
-			<-errc
-			return nil, nil, &UploadError{Src: src, Hash: s.FilesHash, Err: err}
+		var linkHeaders map[string]string
+		if link.Headers != nil {
+			linkHeaders = *link.Headers
 		}
-		tarR.Close()
-		if err := <-errc; err != nil {
-			return nil, nil, &UploadError{Src: src, Hash: s.FilesHash, Err: err}
+		if err := c.uploadFile(ctx, *link.Url, bytes.NewReader(archiveBytes), linkHeaders); err != nil {
+			if ue, ok := errors.AsType[*UploadError](err); ok {
+				ue.Src = src
+				ue.Hash = s.FilesHash
+				return nil, ue
+			}
+			return nil, &UploadError{Src: src, Hash: s.FilesHash, Err: err}
 		}
 	}
 
-	body, err := b.serialize(opts.SkipCache)
-	if err != nil {
-		return nil, nil, err
+	triggerKey := opts.IdempotencyKey
+	if opts.TriggerIdempotencyKey != "" {
+		triggerKey = opts.TriggerIdempotencyKey
 	}
-	if err := c.triggerBuild(ctx, templateID, buildID, *body); err != nil {
-		return nil, nil, err
+	if err := c.triggerBuild(ctx, templateID, buildID, *body, triggerKey); err != nil {
+		return nil, err
 	}
 
 	return &BuildInfo{
@@ -238,43 +415,66 @@ func (c *Client) finishStartBuild(ctx context.Context, b *Builder, opts BuildOpt
 		BuildID:    buildID,
 		Name:       opts.Name,
 		Tags:       tags,
-	}, body, nil
+	}, nil
 }
 
-// pollUntilDone polls /builds/{id}/status until the build reaches a terminal
-// state, forwarding logs and the final outcome into `out`.
-func (c *Client) pollUntilDone(ctx context.Context, info *BuildInfo, interval time.Duration, out chan<- BuildEvent) {
+func (c *Client) pollUntilDone(ctx context.Context, info *BuildInfo, interval time.Duration, onBuildLogs func(LogEntry), out chan<- BuildEvent) {
 	defer close(out)
 	var (
 		logsOffset int
 		tail       = make([]LogEntry, 0, logTailLimit)
 	)
-	emitLog := func(le LogEntry) {
+	sendCancel := func() {
+		select {
+		case out <- BuildEvent{Err: mapTransportErr(ctx.Err())}:
+		default:
+		}
+	}
+	sendTerminal := func(ev BuildEvent) {
+		select {
+		case out <- ev:
+		case <-ctx.Done():
+			sendCancel()
+		}
+	}
+	emitLog := func(le LogEntry) bool {
 		if len(tail) == logTailLimit {
 			tail = tail[1:]
 		}
 		tail = append(tail, le)
-		out <- BuildEvent{Log: &le}
+		if onBuildLogs != nil {
+			onBuildLogs(le)
+		}
+		leCopy := le
+		select {
+		case out <- BuildEvent{Log: &leCopy}:
+			return true
+		case <-ctx.Done():
+			return false
+		}
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			out <- BuildEvent{Err: ctx.Err()}
+			sendCancel()
 			return
 		default:
 		}
 		status, err := c.getBuildStatus(ctx, info.TemplateID, info.BuildID, logsOffset)
 		if err != nil {
-			out <- BuildEvent{Err: err}
+			sendTerminal(BuildEvent{Err: err})
 			return
 		}
 		logsOffset += len(status.Logs)
 		for _, le := range status.Logs {
-			emitLog(le)
+			if !emitLog(le) {
+				sendCancel()
+				return
+			}
 		}
 		switch status.Status {
 		case BuildStatusReady:
-			out <- BuildEvent{Done: info}
+			sendTerminal(BuildEvent{Done: info})
 			return
 		case BuildStatusError:
 			msg, step := "", ""
@@ -282,19 +482,19 @@ func (c *Client) pollUntilDone(ctx context.Context, info *BuildInfo, interval ti
 				msg = status.Reason.Message
 				step = status.Reason.Step
 			}
-			out <- BuildEvent{Err: &BuildError{
+			sendTerminal(BuildEvent{Err: &BuildError{
 				Op:         "poll",
 				TemplateID: info.TemplateID,
 				BuildID:    info.BuildID,
 				Step:       step,
 				Message:    msg,
 				LogTail:    append([]LogEntry(nil), tail...),
-			}}
+			}})
 			return
 		}
 		select {
 		case <-ctx.Done():
-			out <- BuildEvent{Err: ctx.Err()}
+			sendCancel()
 			return
 		case <-time.After(interval):
 		}

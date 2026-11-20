@@ -2,44 +2,47 @@ package template
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"io"
 	"os"
 	"path/filepath"
 )
 
-// tarFileStream pipes a gzip-compressed tar of the file set matched by src
-// (relative to contextDir) through an io.Pipe. The caller PUTs the reader
-// directly to an HTTP endpoint. The returned error channel is closed once
-// the producer goroutine finishes — the caller should receive from it to
-// collect any producer error.
+func tarFileBytes(src, contextDir string, ignorePatterns []string, resolveSymlinks bool) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := writeTarToWriter(&buf, src, contextDir, ignorePatterns, resolveSymlinks); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 func tarFileStream(src, contextDir string, ignorePatterns []string, resolveSymlinks bool) (io.ReadCloser, <-chan error) {
 	pr, pw := io.Pipe()
 	errc := make(chan error, 1)
 	go func() {
-		errc <- writeTar(pw, src, contextDir, ignorePatterns, resolveSymlinks)
+		err := writeTarToWriter(pw, src, contextDir, ignorePatterns, resolveSymlinks)
+		_ = pw.CloseWithError(err)
+		errc <- err
 		close(errc)
 	}()
 	return pr, errc
 }
 
-func writeTar(pw *io.PipeWriter, src, contextDir string, ignorePatterns []string, resolveSymlinks bool) error {
-	gz := gzip.NewWriter(pw)
+func writeTarToWriter(w io.Writer, src, contextDir string, ignorePatterns []string, resolveSymlinks bool) error {
+	gz := gzip.NewWriter(w)
 	tw := tar.NewWriter(gz)
 
 	finalize := func(err error) error {
 		twErr := tw.Close()
 		gzErr := gz.Close()
-		pwErr := pw.CloseWithError(err)
 		if err != nil {
 			return err
 		}
-		for _, e := range []error{twErr, gzErr, pwErr} {
-			if e != nil {
-				return e
-			}
+		if twErr != nil {
+			return twErr
 		}
-		return nil
+		return gzErr
 	}
 
 	files, err := getAllFilesInPath(src, contextDir, ignorePatterns, true)

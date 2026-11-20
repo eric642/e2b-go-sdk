@@ -72,9 +72,33 @@ func TestMakeSymlink_Plain(t *testing.T) {
 	}
 }
 
-func TestFileOps_SkipCacheOnlyAffectsNext(t *testing.T) {
-	b := New().SkipCache().Remove([]string{"/a"}).MakeDir([]string{"/b"})
-	if !b.instructions[0].Force || b.instructions[1].Force {
-		t.Fatalf("force flags: %v %v", b.instructions[0].Force, b.instructions[1].Force)
+func TestFileOps_SkipCacheIsStickyForSubsequentSteps(t *testing.T) {
+	b := New().MakeDir([]string{"/before"}).SkipCache().Remove([]string{"/a"}).MakeDir([]string{"/b"})
+	if b.instructions[0].Force {
+		t.Fatalf("step before SkipCache should not have Force: %+v", b.instructions[0])
+	}
+	if !b.instructions[1].Force || !b.instructions[2].Force {
+		t.Fatalf("SkipCache should be sticky for all subsequent steps, got force flags: %v %v",
+			b.instructions[1].Force, b.instructions[2].Force)
+	}
+}
+
+func TestFileOps_ShellQuotesUnsafePaths(t *testing.T) {
+	b := New().
+		Remove([]string{"/tmp/my dir; rm -rf /"}, WithRemoveForce()).
+		Rename("/a b", "/c'd").
+		MakeDir([]string{"/dir with spaces"}).
+		MakeSymlink("/src path", "/dst path")
+	if got := b.instructions[0].Args[0]; got != "rm -f '/tmp/my dir; rm -rf /'" {
+		t.Fatalf("Remove quote: %q", got)
+	}
+	if got := b.instructions[1].Args[0]; got != `mv '/a b' '/c'"'"'d'` {
+		t.Fatalf("Rename quote: %q", got)
+	}
+	if got := b.instructions[2].Args[0]; got != "mkdir -p '/dir with spaces'" {
+		t.Fatalf("MakeDir quote: %q", got)
+	}
+	if got := b.instructions[3].Args[0]; got != "ln -s '/src path' '/dst path'" {
+		t.Fatalf("MakeSymlink quote: %q", got)
 	}
 }

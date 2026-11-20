@@ -42,7 +42,11 @@ func TestClient_RequestBuild_PostsV3(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := cli.requestBuild(context.Background(), "demo", nil, 2, 1024)
+	resp, err := cli.requestBuildWithOptions(context.Background(), BuildOptions{
+		Name:     "demo",
+		CPUCount: 2,
+		MemoryMB: 1024,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +64,7 @@ func TestClient_RequestBuild_ReturnsErrorOnNon2xx(t *testing.T) {
 	}))
 	defer srv.Close()
 	cli, _ := NewClient(e2b.Config{APIKey: "k", APIURL: srv.URL})
-	_, err := cli.requestBuild(context.Background(), "demo", nil, 0, 0)
+	_, err := cli.requestBuildWithOptions(context.Background(), BuildOptions{Name: "demo"})
 	if err == nil {
 		t.Fatal("expected error on 500")
 	}

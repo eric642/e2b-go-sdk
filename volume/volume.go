@@ -1,9 +1,10 @@
 // Package volume provides a client for E2B persistent volumes.
 //
 // A Volume is independent of a specific sandbox: it can be mounted via
-// e2b.VolumeMount during Sandbox.Create. Content operations (read/write/
-// list) talk to the volume-content REST API and authenticate with a
-// per-volume JWT issued by the control plane.
+// e2b.VolumeMount during Sandbox.Create / CreateV1. Control-plane operations
+// (/volumes) manage volume lifecycles and mint per-volume JWTs, while content
+// operations (/volumecontent/{volumeID}/*) read, stream, write, list, and
+// mutate files and directories inside the volume.
 package volume
 
 import (
@@ -11,21 +12,78 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/eric642/e2b-go-sdk"
 	apiclient "github.com/eric642/e2b-go-sdk/internal/api"
-	"github.com/eric642/e2b-go-sdk/internal/transport"
 	"github.com/eric642/e2b-go-sdk/internal/volumeapi"
 )
 
+// EntryType classifies a filesystem entry inside a persistent volume.
+type EntryType string
+
+const (
+	EntryTypeUnknown   EntryType = "unknown"
+	EntryTypeFile      EntryType = "file"
+	EntryTypeDirectory EntryType = "directory"
+	EntryTypeSymlink   EntryType = "symlink"
+)
+
+// EntryStat describes a file, directory, or symlink inside a persistent volume.
+type EntryStat struct {
+	Name   string    `json:"name"`
+	Type   EntryType `json:"type"`
+	Path   string    `json:"path"`
+	Size   int64     `json:"size"`
+	Mode   uint32    `json:"mode"`
+	UID    uint32    `json:"uid"`
+	GID    uint32    `json:"gid"`
+	ATime  time.Time `json:"atime"`
+	MTime  time.Time `json:"mtime"`
+	CTime  time.Time `json:"ctime"`
+	Target string    `json:"target,omitempty"`
+}
+
+// MetadataOptions configures ownership and permission updates in UpdateMetadata.
+type MetadataOptions struct {
+	UID  *uint32
+	GID  *uint32
+	Mode *uint32
+}
+
+// ListOptions configures directory listing in (*Volume).List.
+type ListOptions struct {
+	// Depth is the number of directory levels to recurse (default: 1 when 0).
+	Depth int
+}
+
+// MakeDirOptions configures directory creation in (*Volume).MakeDirWithOptions.
+type MakeDirOptions struct {
+	UID  *uint32
+	GID  *uint32
+	Mode *uint32
+	// Force creates parent directories if they do not exist (wire query param `force`).
+	Force *bool
+	// Parents is an alias for Force when Force is nil.
+	Parents *bool
+}
+
+// WriteOptions configures file creation/overwrite in (*Volume).WriteFileStream.
+type WriteOptions struct {
+	UID   *uint32
+	GID   *uint32
+	Mode  *uint32
+	Force *bool
+}
+
 // Volume is a handle for one persistent volume.
 type Volume struct {
-	ID    string
-	Name  string
-	token string
+	ID     string
+	Name   string
+	Domain string
+	token  string
 
 	cfg     e2b.Config
 	apiCli  *apiclient.Client
@@ -33,238 +91,393 @@ type Volume struct {
 	httpCli *http.Client
 }
 
-// Info captures volume metadata.
-type Info struct {
-	ID    string
-	Name  string
-	Token string
+// Token returns the per-volume JWT bearer token authenticating content calls.
+// Callers can persist it and later pass it to (*Client).ConnectWithToken or
+// Connect.
+func (v *Volume) Token() string { return v.token }
+
+// GetInfo retrieves control-plane metadata, a freshly minted content JWT, and
+// the optional BYOC cluster domain for this volume.
+//
+// Endpoint: GET /volumes/{volumeID}
+// Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
+func (v *Volume) GetInfo(ctx context.Context) (*Info, error) {
+	return getVolumeInfo(ctx, v.apiCli, v.ID)
 }
 
-// Options configure a single volume call.
-type Options struct {
-	Config e2b.Config
+// Destroy permanently deletes this volume on the control plane, returning
+// (false, nil) when the volume was already gone (HTTP 404).
+//
+// Endpoint: DELETE /volumes/{volumeID}
+// Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
+func (v *Volume) Destroy(ctx context.Context) (bool, error) {
+	return destroyVolume(ctx, v.apiCli, v.ID)
 }
 
-// Create provisions a new volume.
-func Create(ctx context.Context, name string, opts Options) (*Volume, error) {
-	cfg, apiCli, hc, err := bootstrap(opts.Config)
-	if err != nil {
-		return nil, err
-	}
-	body := apiclient.PostVolumesJSONRequestBody{Name: name}
-	resp, err := apiCli.PostVolumes(ctx, body)
-	if err != nil {
-		return nil, wrap(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return nil, volumeHTTPErr(resp)
-	}
-	var parsed apiclient.VolumeAndToken
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return nil, &e2b.VolumeError{Message: "decode create response", Cause: err}
-	}
-	return newVolume(cfg, apiCli, hc, parsed.VolumeID, parsed.Name, parsed.Token)
-}
-
-// Connect attaches to an existing volume using a pre-issued token.
-func Connect(ctx context.Context, volumeID, token string, opts Options) (*Volume, error) {
-	cfg, apiCli, hc, err := bootstrap(opts.Config)
-	if err != nil {
-		return nil, err
-	}
-	// Validate the volume exists.
-	resp, err := apiCli.GetVolumesVolumeID(ctx, volumeID)
-	if err != nil {
-		return nil, wrap(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return nil, volumeHTTPErr(resp)
-	}
-	var parsed apiclient.Volume
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return nil, &e2b.VolumeError{Message: "decode connect response", Cause: err}
-	}
-	return newVolume(cfg, apiCli, hc, parsed.VolumeID, parsed.Name, token)
-}
-
-// List returns all volumes visible to the authenticated caller.
-func List(ctx context.Context, opts Options) ([]Info, error) {
-	_, apiCli, _, err := bootstrap(opts.Config)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := apiCli.GetVolumes(ctx)
-	if err != nil {
-		return nil, wrap(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return nil, volumeHTTPErr(resp)
-	}
-	var out []apiclient.Volume
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, &e2b.VolumeError{Message: "decode list response", Cause: err}
-	}
-	info := make([]Info, 0, len(out))
-	for _, v := range out {
-		info = append(info, Info{ID: v.VolumeID, Name: v.Name})
-	}
-	return info, nil
-}
-
-// Delete removes this volume permanently.
+// Delete removes this volume permanently on the control plane. Deleting a
+// volume that is already gone (HTTP 404) succeeds as a no-op; use
+// (*Volume).Destroy or (*Client).Destroy to distinguish whether a volume existed.
+//
+// Endpoint: DELETE /volumes/{volumeID}
+// Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
 func (v *Volume) Delete(ctx context.Context) error {
-	resp, err := v.apiCli.DeleteVolumesVolumeID(ctx, v.ID)
-	if err != nil {
-		return wrap(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 && resp.StatusCode != http.StatusNotFound {
-		return volumeHTTPErr(resp)
-	}
-	return nil
+	_, err := v.Destroy(ctx)
+	return err
 }
 
-// ReadFile downloads the file at path into memory.
-func (v *Volume) ReadFile(ctx context.Context, path string) ([]byte, error) {
-	resp, err := v.volCli.GetVolumecontentVolumeIDFile(ctx, v.ID,
-		&volumeapi.GetVolumecontentVolumeIDFileParams{Path: path})
-	if err != nil {
-		return nil, wrap(err)
+// Stat returns metadata for the file, directory, or symlink at path.
+// Returns an error wrapping *e2b.FileNotFoundError when path does not exist.
+//
+// Endpoint: GET /volumecontent/{volumeID}/path
+// Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
+func (v *Volume) Stat(ctx context.Context, path string) (*EntryStat, error) {
+	reqCtx, cancel := v.unaryContext(ctx)
+	if cancel != nil {
+		defer cancel()
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return nil, volumeHTTPErr(resp)
-	}
-	return io.ReadAll(resp.Body)
-}
-
-// WriteFile uploads content to path inside the volume.
-func (v *Volume) WriteFile(ctx context.Context, path string, content []byte) error {
-	resp, err := v.volCli.PutVolumecontentVolumeIDFileWithBody(
-		ctx, v.ID,
-		&volumeapi.PutVolumecontentVolumeIDFileParams{Path: path},
-		"application/octet-stream",
-		bytes.NewReader(content),
+	resp, err := v.volCli.GetVolumecontentVolumeIDPath(
+		reqCtx, v.ID,
+		&volumeapi.GetVolumecontentVolumeIDPathParams{Path: path},
 	)
 	if err != nil {
-		return wrap(err)
+		return nil, wrapErr("stat path", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return volumeHTTPErr(resp)
+		return nil, volumeContentErr("stat path", resp, path)
 	}
-	return nil
+	return decodeEntryStat("stat path", resp.Body, path)
 }
 
-// Remove deletes a file or directory from the volume.
+// Exists reports whether a file, directory, or symlink exists at path.
+// It returns (false, nil) on HTTP 404 and propagates any other error.
+//
+// Endpoint: GET /volumecontent/{volumeID}/path
+// Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
+func (v *Volume) Exists(ctx context.Context, path string) (bool, error) {
+	_, err := v.Stat(ctx, path)
+	if err == nil {
+		return true, nil
+	}
+	if _, ok := errors.AsType[*e2b.FileNotFoundError](err); ok {
+		return false, nil
+	}
+	return false, err
+}
+
+// UpdateMetadata updates uid, gid, and/or mode on path and returns the updated
+// EntryStat.
+//
+// Endpoint: PATCH /volumecontent/{volumeID}/path
+// Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
+func (v *Volume) UpdateMetadata(ctx context.Context, path string, opts MetadataOptions) (*EntryStat, error) {
+	reqCtx, cancel := v.unaryContext(ctx)
+	if cancel != nil {
+		defer cancel()
+	}
+	body := volumeapi.PatchVolumecontentVolumeIDPathJSONRequestBody{
+		Uid:  opts.UID,
+		Gid:  opts.GID,
+		Mode: opts.Mode,
+	}
+	resp, err := v.volCli.PatchVolumecontentVolumeIDPath(
+		reqCtx, v.ID,
+		&volumeapi.PatchVolumecontentVolumeIDPathParams{Path: path},
+		body,
+	)
+	if err != nil {
+		return nil, wrapErr("update metadata", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, volumeContentErr("update metadata", resp, path)
+	}
+	return decodeEntryStat("update metadata", resp.Body, path)
+}
+
+// List returns the entries inside the directory at path. Pass ListOptions{Depth}
+// to recurse multiple levels (default depth on the server is 1).
+//
+// Endpoint: GET /volumecontent/{volumeID}/dir
+// Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
+func (v *Volume) List(ctx context.Context, path string, opts ...ListOptions) ([]EntryStat, error) {
+	params := &volumeapi.GetVolumecontentVolumeIDDirParams{Path: path}
+	if len(opts) > 0 {
+		if opts[0].Depth < 0 {
+			inv := &e2b.InvalidArgumentError{Message: "depth must be non-negative"}
+			return nil, &e2b.VolumeError{Message: "list directory", Cause: inv}
+		}
+		if opts[0].Depth > 0 {
+			d := uint32(opts[0].Depth)
+			params.Depth = &d
+		}
+	}
+	reqCtx, cancel := v.unaryContext(ctx)
+	if cancel != nil {
+		defer cancel()
+	}
+	resp, err := v.volCli.GetVolumecontentVolumeIDDir(reqCtx, v.ID, params)
+	if err != nil {
+		return nil, wrapErr("list directory", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, volumeContentErr("list directory", resp, path)
+	}
+	var raw []volumeapi.VolumeEntryStat
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		if errors.Is(err, io.EOF) {
+			return []EntryStat{}, nil
+		}
+		return nil, &e2b.VolumeError{Message: "decode directory listing", Cause: err}
+	}
+	out := make([]EntryStat, 0, len(raw))
+	for _, item := range raw {
+		out = append(out, toEntryStat(item))
+	}
+	return out, nil
+}
+
+// MakeDir creates a directory at path. Use MakeDirWithOptions to configure
+// uid, gid, mode, or parent-directory creation (`Force` / `Parents`) and
+// inspect the resulting EntryStat.
+//
+// Endpoint: POST /volumecontent/{volumeID}/dir
+// Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
+func (v *Volume) MakeDir(ctx context.Context, path string) error {
+	_, err := v.MakeDirWithOptions(ctx, path, MakeDirOptions{})
+	return err
+}
+
+// MakeDirWithOptions creates a directory at path with optional ownership,
+// permissions, and parent creation (`Force` or `Parents`), returning its
+// EntryStat.
+//
+// Endpoint: POST /volumecontent/{volumeID}/dir
+// Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
+func (v *Volume) MakeDirWithOptions(ctx context.Context, path string, opts MakeDirOptions) (*EntryStat, error) {
+	reqCtx, cancel := v.unaryContext(ctx)
+	if cancel != nil {
+		defer cancel()
+	}
+	force := opts.Force
+	if force == nil {
+		force = opts.Parents
+	}
+	params := &volumeapi.PostVolumecontentVolumeIDDirParams{
+		Path:  path,
+		Uid:   opts.UID,
+		Gid:   opts.GID,
+		Mode:  opts.Mode,
+		Force: force,
+	}
+	resp, err := v.volCli.PostVolumecontentVolumeIDDir(reqCtx, v.ID, params)
+	if err != nil {
+		return nil, wrapErr("make directory", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, volumeContentErr("make directory", resp, path)
+	}
+	return decodeEntryStat("make directory", resp.Body, path)
+}
+
+// Remove deletes a file or directory at path from the volume.
+//
+// Endpoint: DELETE /volumecontent/{volumeID}/path
+// Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
 func (v *Volume) Remove(ctx context.Context, path string) error {
+	reqCtx, cancel := v.unaryContext(ctx)
+	if cancel != nil {
+		defer cancel()
+	}
 	resp, err := v.volCli.DeleteVolumecontentVolumeIDPath(
-		ctx, v.ID,
+		reqCtx, v.ID,
 		&volumeapi.DeleteVolumecontentVolumeIDPathParams{Path: path},
 	)
 	if err != nil {
-		return wrap(err)
+		return wrapErr("remove path", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return volumeHTTPErr(resp)
+		return volumeContentErr("remove path", resp, path)
 	}
 	return nil
 }
 
-// MakeDir creates a directory (including parents) at path.
-func (v *Volume) MakeDir(ctx context.Context, path string) error {
-	resp, err := v.volCli.PostVolumecontentVolumeIDDir(
-		ctx, v.ID,
-		&volumeapi.PostVolumecontentVolumeIDDirParams{Path: path},
+// ReadFile downloads the file at path into memory. When ctx has no deadline, a
+// 1-hour transfer timeout (DefaultFileTransferTimeout) is applied.
+//
+// Endpoint: GET /volumecontent/{volumeID}/file
+// Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
+func (v *Volume) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	rc, err := v.ReadFileStream(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, wrapErr("read file", err)
+	}
+	return data, nil
+}
+
+// ReadFileString downloads the file at path as a UTF-8 string. When ctx has no
+// deadline, a 1-hour transfer timeout (DefaultFileTransferTimeout) is applied.
+//
+// Endpoint: GET /volumecontent/{volumeID}/file
+// Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
+func (v *Volume) ReadFileString(ctx context.Context, path string) (string, error) {
+	data, err := v.ReadFile(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// ReadFileStream opens a streaming download for the file at path. On success
+// (HTTP 200), the caller owns the returned io.ReadCloser and MUST close it to
+// release the underlying connection and transfer timer.
+//
+// Endpoint: GET /volumecontent/{volumeID}/file
+// Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
+func (v *Volume) ReadFileStream(ctx context.Context, path string) (io.ReadCloser, error) {
+	reqCtx, cancel := v.transferContext(ctx)
+	resp, err := v.volCli.GetVolumecontentVolumeIDFile(
+		reqCtx, v.ID,
+		&volumeapi.GetVolumecontentVolumeIDFileParams{Path: path},
 	)
 	if err != nil {
-		return wrap(err)
+		if cancel != nil {
+			cancel()
+		}
+		return nil, wrapErr("read file", err)
+	}
+	if resp.StatusCode >= 300 {
+		err := volumeContentErr("read file", resp, path)
+		_ = resp.Body.Close()
+		if cancel != nil {
+			cancel()
+		}
+		return nil, err
+	}
+	if cancel == nil {
+		return resp.Body, nil
+	}
+	return &cancelOnCloseReadCloser{ReadCloser: resp.Body, cancel: cancel}, nil
+}
+
+// WriteFile uploads content to path inside the volume. Use WriteFileWithOptions
+// or WriteFileStream to set uid/gid/mode/force options or inspect the returned
+// EntryStat.
+//
+// Endpoint: PUT /volumecontent/{volumeID}/file
+// Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
+func (v *Volume) WriteFile(ctx context.Context, path string, content []byte) error {
+	_, err := v.WriteFileStream(ctx, path, bytes.NewReader(content))
+	return err
+}
+
+// WriteFileWithOptions uploads content to path inside the volume with optional
+// uid, gid, mode, and force query parameters, returning the written EntryStat.
+//
+// Endpoint: PUT /volumecontent/{volumeID}/file
+// Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
+func (v *Volume) WriteFileWithOptions(ctx context.Context, path string, content []byte, opts WriteOptions) (*EntryStat, error) {
+	return v.WriteFileStream(ctx, path, bytes.NewReader(content), opts)
+}
+
+// WriteFileStream streams r (`application/octet-stream`) to path inside the
+// volume with optional uid, gid, mode, and force query parameters, returning
+// the written file's EntryStat. When ctx has no deadline, a 1-hour transfer
+// timeout (DefaultFileTransferTimeout) is applied.
+//
+// Endpoint: PUT /volumecontent/{volumeID}/file
+// Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
+func (v *Volume) WriteFileStream(ctx context.Context, path string, r io.Reader, opts ...WriteOptions) (*EntryStat, error) {
+	reqCtx, cancel := v.transferContext(ctx)
+	if cancel != nil {
+		defer cancel()
+	}
+	params := &volumeapi.PutVolumecontentVolumeIDFileParams{Path: path}
+	if len(opts) > 0 {
+		params.Uid = opts[0].UID
+		params.Gid = opts[0].GID
+		params.Mode = opts[0].Mode
+		params.Force = opts[0].Force
+	}
+	resp, err := v.volCli.PutVolumecontentVolumeIDFileWithBody(
+		reqCtx, v.ID,
+		params,
+		"application/octet-stream",
+		r,
+	)
+	if err != nil {
+		return nil, wrapErr("write file", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return volumeHTTPErr(resp)
+		return nil, volumeContentErr("write file", resp, path)
 	}
-	return nil
+	return decodeEntryStat("write file", resp.Body, path)
 }
 
-// Token returns the auth token for this volume. Callers can persist it and
-// later pass it to Connect.
-func (v *Volume) Token() string { return v.token }
-
-// bootstrap resolves config and builds an API client for volume-level ops
-// (create/connect/list/delete). Returns the resolved config, api client,
-// and http client.
-func bootstrap(cfg e2b.Config) (e2b.Config, *apiclient.Client, *http.Client, error) {
-	// Use the same REST surface as the core SDK.
-	cfgOut := cfg
-	// Call the sandbox.Config resolve via indirect path: use default
-	// behaviour via a throwaway client.
-	hc := cfg.HTTPClient
-	if hc == nil {
-		hc = &http.Client{}
+func (v *Volume) unaryContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		return ctx, nil
 	}
-	apiCli, err := transport.NewAPIClient(apiURL(cfg), hc,
-		transport.Auth{APIKey: apiKey(cfg), AccessToken: accessToken(cfg), Headers: cfg.Headers})
-	if err != nil {
-		return cfgOut, nil, nil, &e2b.VolumeError{Message: "init api client", Cause: err}
+	if v.cfg.RequestTimeoutDisabled || v.cfg.RequestTimeout <= 0 {
+		return ctx, nil
 	}
-	return cfgOut, apiCli, hc, nil
+	return context.WithTimeout(ctx, v.cfg.RequestTimeout)
 }
 
-// newVolume builds the volume content client using the returned token.
-func newVolume(cfg e2b.Config, apiCli *apiclient.Client, hc *http.Client, id, name, token string) (*Volume, error) {
-	volCli, err := transport.NewVolumeAPIClient(apiURL(cfg), hc, token, cfg.Headers)
-	if err != nil {
-		return nil, &e2b.VolumeError{Message: "init volume content client", Cause: err}
+func (v *Volume) transferContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		return ctx, nil
 	}
-	return &Volume{
-		ID:      id,
-		Name:    name,
-		token:   token,
-		cfg:     cfg,
-		apiCli:  apiCli,
-		volCli:  volCli,
-		httpCli: hc,
-	}, nil
+	if v.cfg.RequestTimeoutDisabled {
+		return ctx, nil
+	}
+	return context.WithTimeout(ctx, DefaultFileTransferTimeout)
 }
 
-// wrap converts a transport error into an e2b.VolumeError unless it's
-// already an SDK error.
-func wrap(err error) error {
-	if err == nil {
-		return nil
-	}
-	var se e2b.Error
-	if errors.As(err, &se) {
-		return err
-	}
-	return &e2b.VolumeError{Message: "volume request failed", Cause: err}
+type cancelOnCloseReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
 }
 
-// volumeHTTPErr decodes an HTTP error body as VolumeError.
-func volumeHTTPErr(resp *http.Response) error {
-	body, _ := io.ReadAll(resp.Body)
-	return &e2b.VolumeError{Message: fmt.Sprintf("http %d: %s", resp.StatusCode, string(body))}
+func (c *cancelOnCloseReadCloser) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
 }
 
-// Reach into e2b.Config for fields not re-exported publicly. Since
-// e2b.Config fields are capitalized they are accessible directly.
-func apiURL(cfg e2b.Config) string {
-	if cfg.APIURL != "" {
-		return cfg.APIURL
+func decodeEntryStat(op string, r io.Reader, fallbackPath string) (*EntryStat, error) {
+	var raw volumeapi.VolumeEntryStat
+	if err := json.NewDecoder(r).Decode(&raw); err != nil {
+		if errors.Is(err, io.EOF) {
+			return &EntryStat{Path: fallbackPath}, nil
+		}
+		return nil, &e2b.VolumeError{Message: op + ": decode entry stat", Cause: err}
 	}
-	d := cfg.Domain
-	if d == "" {
-		d = e2b.DefaultDomain
-	}
-	if cfg.Debug {
-		return "http://localhost:3000"
-	}
-	return "https://api." + d
+	stat := toEntryStat(raw)
+	return &stat, nil
 }
-func apiKey(cfg e2b.Config) string      { return cfg.APIKey }
-func accessToken(cfg e2b.Config) string { return cfg.AccessToken }
+
+func toEntryStat(in volumeapi.VolumeEntryStat) EntryStat {
+	return EntryStat{
+		Name:   in.Name,
+		Type:   EntryType(in.Type),
+		Path:   in.Path,
+		Size:   in.Size,
+		Mode:   in.Mode,
+		UID:    in.Uid,
+		GID:    in.Gid,
+		ATime:  in.Atime,
+		MTime:  in.Mtime,
+		CTime:  in.Ctime,
+		Target: derefString(in.Target),
+	}
+}

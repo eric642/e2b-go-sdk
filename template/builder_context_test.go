@@ -2,26 +2,26 @@ package template
 
 import "testing"
 
-func TestSkipCache_ForcesOnlyNextLayer(t *testing.T) {
-	b := New().FromImage("alpine:3").SkipCache().Run("echo hi").Run("echo other")
-	if len(b.instructions) != 2 {
-		t.Fatalf("expected 2 instructions, got %d", len(b.instructions))
+func TestSkipCache_ForcesAllSubsequentLayers(t *testing.T) {
+	b := New().FromImage("alpine:3").Run("cached").SkipCache().Run("echo hi").Run("echo other")
+	if len(b.instructions) != 3 {
+		t.Fatalf("expected 3 instructions, got %d", len(b.instructions))
 	}
-	if !b.instructions[0].Force {
-		t.Fatal("first instruction should be force-marked")
+	if b.instructions[0].Force {
+		t.Fatal("instruction before SkipCache should not be force-marked")
 	}
-	if b.instructions[1].Force {
-		t.Fatal("second instruction should not be force-marked")
+	if !b.instructions[1].Force || !b.instructions[2].Force {
+		t.Fatalf("all instructions after SkipCache should be force-marked: %+v", b.instructions)
 	}
 }
 
-func TestSkipCache_ResetsAfterCopy(t *testing.T) {
+func TestSkipCache_StickyAcrossCopyAndRun(t *testing.T) {
 	b := New().FromImage("alpine:3").SkipCache().Copy("f", "/d").Run("echo other")
 	if !b.instructions[0].Force {
 		t.Fatal("COPY should be force-marked")
 	}
-	if b.instructions[1].Force {
-		t.Fatal("RUN should not inherit force flag")
+	if !b.instructions[1].Force {
+		t.Fatal("subsequent RUN should inherit sticky force flag")
 	}
 }
 

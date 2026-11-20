@@ -1,12 +1,11 @@
-// Package transport wires the REST (oapi-codegen) and Connect-RPC clients
-// used by the public e2b package. Everything here is internal: the exported
-// helpers are thin constructors consumed by sandbox.go, volume/, etc.
 package transport
 
 import (
 	"context"
 	"encoding/base64"
+	"maps"
 	"net/http"
+	"strconv"
 
 	"connectrpc.com/connect"
 
@@ -17,27 +16,42 @@ import (
 	"github.com/eric642/e2b-go-sdk/internal/volumeapi"
 )
 
+// Wire constants shared by every envd request. They mirror the headers the
+// upstream JS/Python SDKs attach so self-hosted proxies (e.g. E2B Embed on
+// localhost:3002 or a sandbox.<domain> gateway) can route envd traffic.
+const (
+	EnvdPort = 49983
+
+	HeaderAccessToken   = "X-Access-Token"
+	HeaderAuthorization = "Authorization"
+	HeaderSandboxID     = "E2b-Sandbox-Id"
+	HeaderSandboxPort   = "E2b-Sandbox-Port"
+	HeaderAPIKey        = "X-API-Key"
+
+	// HeaderKeepalivePing asks envd to emit keepalive messages on server
+	// streams so idle proxies do not cut long-running streams.
+	HeaderKeepalivePing = "Keepalive-Ping-Interval"
+	// KeepalivePingIntervalSec is the keepalive interval requested on every
+	// streaming envd RPC (matches upstream KEEPALIVE_PING_INTERVAL_SEC).
+	KeepalivePingIntervalSec = 50
+)
+
 func basicUserAuth(user string) string {
 	return base64.StdEncoding.EncodeToString([]byte(user + ":"))
 }
 
-// Auth describes how to authenticate against the control-plane REST API.
-// Exactly one of APIKey or AccessToken should be set (APIKey wins if both).
 type Auth struct {
 	APIKey      string
 	AccessToken string
 	Headers     map[string]string
 }
 
-// AsRequestEditor builds a RequestEditorFn that injects the auth header and
-// any extra headers the caller supplied.
 func (a Auth) AsRequestEditor() apiclient.RequestEditorFn {
 	return func(_ context.Context, req *http.Request) error {
 		if a.APIKey != "" {
-			req.Header.Set("X-API-Key", a.APIKey)
-		}
-		if a.AccessToken != "" {
-			req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+			req.Header.Set(HeaderAPIKey, a.APIKey)
+		} else if a.AccessToken != "" {
+			req.Header.Set(HeaderAuthorization, "Bearer "+a.AccessToken)
 		}
 		for k, v := range a.Headers {
 			if req.Header.Get(k) == "" {
@@ -48,7 +62,6 @@ func (a Auth) AsRequestEditor() apiclient.RequestEditorFn {
 	}
 }
 
-// NewAPIClient builds the control-plane REST client (https://api.<domain>).
 func NewAPIClient(baseURL string, hc *http.Client, auth Auth) (*apiclient.Client, error) {
 	return apiclient.NewClient(
 		baseURL,
@@ -57,79 +70,102 @@ func NewAPIClient(baseURL string, hc *http.Client, auth Auth) (*apiclient.Client
 	)
 }
 
-// EnvdAuth is the envd (in-sandbox) access token. It is returned by the
-// control plane when the sandbox is created. The access token goes in an
-// X-Access-Token header on every envd request (RPC and plain HTTP).
-//
-// User is the already-resolved username for HTTP Basic auth. The caller (the
-// e2b package) decides whether to populate it based on the envd version: at or
-// above envd 0.4.0 the server infers the default user, so User is left empty
-// and no Authorization header is sent; below 0.4.0 the caller sets it to the
-// fallback user. An empty User therefore means "omit the Authorization header".
 type EnvdAuth struct {
-	Token   string
-	User    string
-	Headers map[string]string
+	Token     string
+	User      string
+	SandboxID string
+	Headers   map[string]string
 }
 
-// envdStreamHeaderInterceptor sets the envd auth/header set on every unary
-// and streaming call initiated by the client.
-type envdStreamHeaderInterceptor struct{ a EnvdAuth }
+type envdUserKey struct{}
 
-func (i envdStreamHeaderInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
+func WithEnvdUser(ctx context.Context, user string) context.Context {
+	return context.WithValue(ctx, envdUserKey{}, user)
+}
+
+func envdUserFromContext(ctx context.Context) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	u, ok := ctx.Value(envdUserKey{}).(string)
+	return u, ok
+}
+
+func (a EnvdAuth) userFor(ctx context.Context) string {
+	if u, ok := envdUserFromContext(ctx); ok {
+		return u
+	}
+	return a.User
+}
+
+func ApplyEnvdHeaders(req *http.Request, auth EnvdAuth, resolvedUser string) {
+	applyEnvdHeader(req.Header, auth, resolvedUser)
+}
+
+// applyEnvdHeader mirrors the upstream SDKs: the Basic Authorization header is
+// governed solely by the resolved user. Extra headers must not be able to
+// inject their own Authorization (that would defeat default-user inference on
+// envd >= 0.4.0 and could forward a control-plane bearer to envd), nor
+// overwrite the access token or routing headers.
+func applyEnvdHeader(h http.Header, a EnvdAuth, user string) {
+	if a.Token != "" {
+		h.Set(HeaderAccessToken, a.Token)
+	}
+	if a.SandboxID != "" {
+		h.Set(HeaderSandboxID, a.SandboxID)
+		h.Set(HeaderSandboxPort, strconv.Itoa(EnvdPort))
+	}
+	if user != "" {
+		h.Set(HeaderAuthorization, "Basic "+basicUserAuth(user))
+	} else {
+		h.Del(HeaderAuthorization)
+	}
+	for k, v := range a.Headers {
+		ck := http.CanonicalHeaderKey(k)
+		if ck == HeaderAuthorization {
+			continue
+		}
+		// The SDK User-Agent replaces transport defaults such as
+		// "connect-go/x.y"; other extras never overwrite a set header.
+		if ck == "User-Agent" || h.Get(ck) == "" {
+			h.Set(ck, v)
+		}
+	}
+}
+
+type envdHeaderInterceptor struct{ a EnvdAuth }
+
+func (i envdHeaderInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-		i.a.applyHeader(req.Header())
+		applyEnvdHeader(req.Header(), i.a, i.a.userFor(ctx))
 		return next(ctx, req)
 	}
 }
 
-func (i envdStreamHeaderInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
+func (i envdHeaderInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
 	return func(ctx context.Context, spec connect.Spec) connect.StreamingClientConn {
 		conn := next(ctx, spec)
-		i.a.applyHeader(conn.RequestHeader())
+		h := conn.RequestHeader()
+		applyEnvdHeader(h, i.a, i.a.userFor(ctx))
+		h.Set(HeaderKeepalivePing, strconv.Itoa(KeepalivePingIntervalSec))
 		return conn
 	}
 }
 
-func (i envdStreamHeaderInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
+func (i envdHeaderInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
 	return next
 }
 
-func (a EnvdAuth) applyHeader(h http.Header) {
-	if a.Token != "" {
-		h.Set("X-Access-Token", a.Token)
-	}
-	// Mirror the upstream SDKs' authenticationHeader: the Basic Authorization
-	// header is governed solely by the resolved user. Only attach it when a
-	// username is resolved; the e2b package leaves User empty for envd >= 0.4.0
-	// so the server can infer the default user. Extra headers must not be able
-	// to inject their own Authorization on the no-user path (that would defeat
-	// default-user inference and could forward a control-plane bearer to envd).
-	if a.User != "" {
-		h.Set("Authorization", "Basic "+basicUserAuth(a.User))
-	}
-	for k, v := range a.Headers {
-		if http.CanonicalHeaderKey(k) == "Authorization" {
-			continue
-		}
-		if h.Get(k) == "" {
-			h.Set(k, v)
-		}
-	}
-}
-
-// NewEnvdClients builds the two Connect-RPC clients used by the sandbox
-// (Process + Filesystem) plus the plain-HTTP client for /files, /metrics,
-// /envs. baseURL is the envd root URL (https://49983-<id>.<domain>).
 type EnvdClients struct {
 	Process    processconnect.ProcessClient
 	Filesystem filesystemconnect.FilesystemClient
 	API        *envdapi.Client
+	Auth       EnvdAuth
 }
 
-// NewEnvdClients constructs Connect and REST clients for envd traffic.
 func NewEnvdClients(baseURL string, hc *http.Client, auth EnvdAuth) (*EnvdClients, error) {
-	interceptor := envdStreamHeaderInterceptor{a: auth}
+	auth.Headers = maps.Clone(auth.Headers)
+	interceptor := envdHeaderInterceptor{a: auth}
 	// Request JSON codec to match Python/JS (envd is a Connect-RPC server
 	// that speaks both proto and JSON; JSON gives us cleaner debugging).
 	opts := []connect.ClientOption{
@@ -139,21 +175,8 @@ func NewEnvdClients(baseURL string, hc *http.Client, auth EnvdAuth) (*EnvdClient
 	proc := processconnect.NewProcessClient(hc, baseURL, opts...)
 	fs := filesystemconnect.NewFilesystemClient(hc, baseURL, opts...)
 
-	envdEditor := func(_ context.Context, req *http.Request) error {
-		if auth.Token != "" {
-			req.Header.Set("X-Access-Token", auth.Token)
-		}
-		if auth.User != "" {
-			req.Header.Set("Authorization", "Basic "+basicUserAuth(auth.User))
-		}
-		for k, v := range auth.Headers {
-			if http.CanonicalHeaderKey(k) == "Authorization" {
-				continue
-			}
-			if req.Header.Get(k) == "" {
-				req.Header.Set(k, v)
-			}
-		}
+	envdEditor := func(ctx context.Context, req *http.Request) error {
+		applyEnvdHeader(req.Header, auth, auth.userFor(ctx))
 		return nil
 	}
 	apiCli, err := envdapi.NewClient(baseURL,
@@ -163,17 +186,27 @@ func NewEnvdClients(baseURL string, hc *http.Client, auth EnvdAuth) (*EnvdClient
 	if err != nil {
 		return nil, err
 	}
-	return &EnvdClients{Process: proc, Filesystem: fs, API: apiCli}, nil
+	return &EnvdClients{Process: proc, Filesystem: fs, API: apiCli, Auth: auth}, nil
 }
 
-// NewVolumeAPIClient builds the volume-content REST client using a JWT
-// bearer token scoped to a single volume.
 func NewVolumeAPIClient(baseURL string, hc *http.Client, token string, extraHeaders map[string]string) (*volumeapi.Client, error) {
+	var hdrs map[string]string
+	if extraHeaders != nil {
+		hdrs = make(map[string]string, len(extraHeaders))
+		for k, v := range extraHeaders {
+			if http.CanonicalHeaderKey(k) == HeaderAuthorization {
+				continue
+			}
+			hdrs[k] = v
+		}
+	}
 	editor := func(_ context.Context, req *http.Request) error {
 		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set(HeaderAuthorization, "Bearer "+token)
+		} else {
+			req.Header.Del(HeaderAuthorization)
 		}
-		for k, v := range extraHeaders {
+		for k, v := range hdrs {
 			if req.Header.Get(k) == "" {
 				req.Header.Set(k, v)
 			}

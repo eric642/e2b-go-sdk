@@ -37,6 +37,10 @@ func parseDockerfile(b *Builder, src string) *Builder {
 		switch strings.ToUpper(head) {
 		case "FROM":
 			b.baseImage = rest
+			b.baseTemplate = ""
+			if b.forceNextLayer {
+				b.force = true
+			}
 		case "RUN":
 			b.RunCmd(rest)
 		case "COPY":
@@ -53,9 +57,6 @@ func parseDockerfile(b *Builder, src string) *Builder {
 			if len(envs) > 0 {
 				b.SetEnvs(envs)
 			}
-		default:
-			// TODO: parser ignores unsupported instructions (LABEL,
-			// HEALTHCHECK, ENTRYPOINT, CMD, ARG, etc.). Extend as needed.
 		}
 	}
 	return b
@@ -69,12 +70,9 @@ func splitInstruction(line string) (head, rest string) {
 	return line[:space], strings.TrimSpace(line[space+1:])
 }
 
-// parseEnvLine splits an "ENV" value into key/value pairs. Only the
-// "ENV KEY=VALUE [KEY=VALUE ...]" form is supported (not the legacy
-// "ENV KEY VALUE" form, which is ambiguous with multiple keys).
 func parseEnvLine(rest string) map[string]string {
 	envs := map[string]string{}
-	for _, tok := range strings.Fields(rest) {
+	for tok := range strings.FieldsSeq(rest) {
 		eq := strings.IndexByte(tok, '=')
 		if eq <= 0 {
 			continue

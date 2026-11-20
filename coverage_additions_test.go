@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
-)
 
-// --- Snapshots --------------------------------------------------------------
+	"github.com/eric642/e2b-go-sdk/internal/transport"
+)
 
 func TestListSnapshotsPaginatesViaNextToken(t *testing.T) {
 	mock := newRESTMock(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -105,8 +105,6 @@ func TestDeleteSnapshot(t *testing.T) {
 	}
 }
 
-// --- GetMetrics time range --------------------------------------------------
-
 func TestGetMetricsSendsStartEndParams(t *testing.T) {
 	start := time.Unix(1000, 0)
 	end := time.Unix(2000, 0)
@@ -138,8 +136,6 @@ func TestGetMetricsOmitsParamsWhenNoOpts(t *testing.T) {
 	}
 }
 
-// --- MCP --------------------------------------------------------------------
-
 func TestGetMcpURL(t *testing.T) {
 	sbx := &Sandbox{ID: "sbx-1", Domain: "example.com", cfg: Config{Domain: "example.com"}}
 	got := sbx.GetMcpURL()
@@ -149,11 +145,7 @@ func TestGetMcpURL(t *testing.T) {
 	}
 }
 
-// --- envd version gating: file URL username ---------------------------------
-
 func TestBuildFileURLOmitsUsernameForNewEnvd(t *testing.T) {
-	// envd >= 0.4.0 with no explicit user -> username omitted, signature uses
-	// empty user.
 	sbx := &Sandbox{
 		ID: "sbx-1", Domain: "example.com", EnvdVersion: "0.5.7",
 		EnvdAccessToken: "tok", cfg: Config{Domain: "example.com"},
@@ -201,19 +193,26 @@ func TestBuildFileURLKeepsExplicitUsername(t *testing.T) {
 	}
 }
 
-// --- envd version gating: upload strategy -----------------------------------
-
-// newEnvdHTTPSandbox builds a *Sandbox whose envd /files endpoint is the given
-// httptest server (via cfg.SandboxURL), with a real httpCli.
 func newEnvdHTTPSandbox(t *testing.T, envdVersion string, h http.Handler) *Sandbox {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	cfg := Config{Domain: "example.com", SandboxURL: srv.URL}.resolve()
-	return &Sandbox{
+	hc := cfg.DataPlaneHTTPClient()
+	sbx := &Sandbox{
 		ID: "sbx-1", Domain: "example.com", EnvdVersion: envdVersion,
-		cfg: cfg, httpCli: cfg.httpClient(),
+		cfg: cfg, httpCli: hc,
 	}
+	envd, err := transport.NewEnvdClients(srv.URL, hc, transport.EnvdAuth{
+		User:      resolveEnvdUser(sbx.envdVersionForGating(), ""),
+		SandboxID: sbx.ID,
+		Headers:   cfg.envdHeaders(),
+	})
+	if err != nil {
+		t.Fatalf("NewEnvdClients: %v", err)
+	}
+	sbx.envd = envd
+	return sbx
 }
 
 func TestWriteUsesOctetStreamForNewEnvd(t *testing.T) {
@@ -234,7 +233,6 @@ func TestWriteUsesOctetStreamForNewEnvd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteString: %v", err)
 	}
-	// Metadata must come from the envd response, not a synthesized stub.
 	if info.Name != "p" || info.Path != "/p" || info.Type != EntryTypeFile {
 		t.Fatalf("WriteInfo metadata not populated from response: %+v", info)
 	}
@@ -276,7 +274,6 @@ func TestWriteFilesWritesEachEntry(t *testing.T) {
 	sbx := newEnvdHTTPSandbox(t, "0.5.7", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Query().Get("path")
 		got = append(got, p)
-		// Echo back the entry as envd would, deriving a name from the path.
 		name := p
 		if i := strings.LastIndex(p, "/"); i >= 0 {
 			name = p[i+1:]
@@ -296,7 +293,6 @@ func TestWriteFilesWritesEachEntry(t *testing.T) {
 	if len(res) != 2 || res[0].Path != "/a" || res[1].Path != "/b" {
 		t.Fatalf("results: %+v", res)
 	}
-	// Each result must carry real metadata from its own response, not zero values.
 	if res[0].Name != "a" || res[0].Type != EntryTypeFile || res[1].Name != "b" {
 		t.Fatalf("WriteFiles metadata not populated: %+v", res)
 	}
@@ -324,7 +320,6 @@ func TestGetMcpTokenReadsAsRootAndTrims(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != "/files" {
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		// Token file is root-owned: the read must request user=root explicitly.
 		if got := r.URL.Query().Get("username"); got != "root" {
 			t.Errorf("username=%q want root", got)
 		}
@@ -339,8 +334,6 @@ func TestGetMcpTokenReadsAsRootAndTrims(t *testing.T) {
 		t.Fatalf("token=%q want trimmed secret-token", tok)
 	}
 }
-
-// --- envd version gating: recursive watch & close stdin prechecks -----------
 
 func TestWatchRecursiveRejectedOnOldEnvd(t *testing.T) {
 	sbx := &Sandbox{EnvdVersion: "0.1.3", cfg: Config{}}
@@ -365,8 +358,6 @@ func TestCloseStdinRejectedOnOldEnvd(t *testing.T) {
 		t.Fatalf("want *TemplateError, got %T: %v", err, err)
 	}
 }
-
-// --- filesystem List depth --------------------------------------------------
 
 func TestListRejectsNegativeDepth(t *testing.T) {
 	sbx := &Sandbox{EnvdVersion: "0.5.7", cfg: Config{}}

@@ -1,6 +1,9 @@
 package template
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestRunCmd_WithUser(t *testing.T) {
 	b := New().RunCmd("apt-get update", WithRunUser("root"))
@@ -80,9 +83,31 @@ func TestSetEnvs_EmptyMapNoOp(t *testing.T) {
 	}
 }
 
-func TestSetWorkdirUser_SkipCacheAffectsOnlyNext(t *testing.T) {
-	b := New().SkipCache().SetWorkdir("/app").SetUser("root")
-	if !b.instructions[0].Force || b.instructions[1].Force {
-		t.Fatalf("force: %v %v", b.instructions[0].Force, b.instructions[1].Force)
+func TestSetWorkdirUser_SkipCacheIsSticky(t *testing.T) {
+	b := New().RunCmd("before").SkipCache().SetWorkdir("/app").SetUser("root").Env("K", "V")
+	if b.instructions[0].Force {
+		t.Fatalf("step before SkipCache should have Force=false")
+	}
+	for i := 1; i < len(b.instructions); i++ {
+		if !b.instructions[i].Force {
+			t.Fatalf("step %d after SkipCache should have Force=true: %+v", i, b.instructions[i])
+		}
+	}
+}
+
+func TestSetEnvs_DeterministicSortedKeyOrder(t *testing.T) {
+	envs := map[string]string{
+		"ZEBRA":  "26",
+		"ALPHA":  "1",
+		"MIDDLE": "13",
+		"BETA":   "2",
+	}
+	want := []string{"ALPHA", "1", "BETA", "2", "MIDDLE", "13", "ZEBRA", "26"}
+	for range 50 {
+		b := New().SetEnvs(envs)
+		got := b.instructions[0].Args
+		if !slices.Equal(got, want) {
+			t.Fatalf("got %v want %v", got, want)
+		}
 	}
 }

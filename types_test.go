@@ -8,7 +8,6 @@ import (
 )
 
 func TestSandboxInfoFromAPIMinimal(t *testing.T) {
-	// Bare minimum populated. Optional pointer fields are nil.
 	d := &apiclient.SandboxDetail{
 		SandboxID:   "sbx-123",
 		TemplateID:  "base",
@@ -99,7 +98,7 @@ func TestSandboxInfoFromAPIAllFields(t *testing.T) {
 	if info.Network == nil ||
 		len(info.Network.AllowOut) != 1 || info.Network.AllowOut[0] != "1.0.0.0/24" ||
 		len(info.Network.DenyOut) != 1 || info.Network.DenyOut[0] != "8.8.8.8/32" ||
-		!info.Network.AllowPublicTraffic ||
+		info.Network.AllowPublicTraffic == nil || !*info.Network.AllowPublicTraffic ||
 		info.Network.MaskRequestHost != maskHost {
 		t.Fatalf("Network unmarshal broken: %+v", info.Network)
 	}
@@ -117,7 +116,6 @@ func TestSandboxInfoFromAPINetworkPartialFields(t *testing.T) {
 		SandboxID: "sbx",
 		Network: &apiclient.SandboxNetworkConfig{
 			AllowOut: &allowOut,
-			// DenyOut, AllowPublicTraffic, MaskRequestHost left nil
 		},
 	}
 	info := sandboxInfoFromAPI(d)
@@ -127,33 +125,25 @@ func TestSandboxInfoFromAPINetworkPartialFields(t *testing.T) {
 	if len(info.Network.DenyOut) != 0 {
 		t.Fatalf("DenyOut should be empty slice, got %v", info.Network.DenyOut)
 	}
-	if info.Network.AllowPublicTraffic {
-		t.Fatal("AllowPublicTraffic should default to false")
+	if info.Network.AllowPublicTraffic != nil {
+		t.Fatalf("AllowPublicTraffic should default to nil when omitted, got %v", *info.Network.AllowPublicTraffic)
 	}
 	if info.Network.MaskRequestHost != "" {
 		t.Fatalf("MaskRequestHost should default to empty, got %q", info.Network.MaskRequestHost)
 	}
 }
 
-func TestURLEscape(t *testing.T) {
-	cases := []struct{ in, out string }{
-		{"simple", "simple"},
-		{"/path/with/slash", "%2Fpath%2Fwith%2Fslash"},
-		{"has space", "has+space"}, // QueryEscape uses '+' for spaces
-		{"a=b&c", "a%3Db%26c"},
-	}
-	for _, tc := range cases {
-		if got := urlEscape(tc.in); got != tc.out {
-			t.Fatalf("urlEscape(%q) = %q, want %q", tc.in, got, tc.out)
-		}
-	}
-}
-
 func TestEntryTypeConstants(t *testing.T) {
-	// Just verify ordering remains stable (zero is Unspecified). Callers rely
-	// on this when checking File vs Directory.
-	if EntryTypeUnspecified == EntryTypeFile || EntryTypeFile == EntryTypeDirectory {
-		t.Fatal("EntryType constants must be distinct")
+	if EntryTypeUnspecified != 0 || EntryTypeFile != 1 || EntryTypeDirectory != 2 || EntryTypeSymlink != 3 {
+		t.Fatalf("unexpected EntryType values: %d %d %d %d",
+			EntryTypeUnspecified, EntryTypeFile, EntryTypeDirectory, EntryTypeSymlink)
+	}
+	if EntryTypeFile.String() != "file" ||
+		EntryTypeDirectory.String() != "directory" ||
+		EntryTypeSymlink.String() != "symlink" ||
+		EntryTypeUnspecified.String() != "" {
+		t.Fatalf("unexpected EntryType.String() values: %q %q %q %q",
+			EntryTypeFile, EntryTypeDirectory, EntryTypeSymlink, EntryTypeUnspecified)
 	}
 }
 

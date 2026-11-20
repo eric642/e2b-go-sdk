@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -11,8 +12,6 @@ import (
 	apiclient "github.com/eric642/e2b-go-sdk/internal/api"
 )
 
-// fakeListedSandbox builds a ListedSandbox JSON body element. Times are
-// RFC3339 so the generated time.Time fields parse.
 func fakeListedSandbox(id string) map[string]any {
 	return map[string]any{
 		"sandboxID":   id,
@@ -52,8 +51,6 @@ func TestConfigReturnsDeepCopyOfMaps(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 
-	// Mutating the returned Config must not leak into the Client's live maps,
-	// which the request editor reads on every call.
 	got := c.Config()
 	got.Headers["X-Custom"] = "tampered"
 	got.Headers["X-Injected"] = "nope"
@@ -75,7 +72,7 @@ func TestClientReusesAPIClientAcrossCreates(t *testing.T) {
 	mock := newRESTMock(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assertAuthHeader(t, r, "test-key")
 		n++
-		writeJSON(t, w, http.StatusCreated, fakeSandboxResponse("sbx-"+itoa(n), "example.com", "", ""))
+		writeJSON(t, w, http.StatusCreated, fakeSandboxResponse("sbx-"+strconv.Itoa(n), "example.com", "", ""))
 	}))
 
 	c, err := NewClient(mock.Config)
@@ -97,8 +94,17 @@ func TestClientReusesAPIClientAcrossCreates(t *testing.T) {
 	if sbx1.httpCli != sbx2.httpCli {
 		t.Error("two sandboxes from one Client should share the same *http.Client")
 	}
-	if sbx1.apiCli != c.apiCli || sbx1.httpCli != c.httpCli {
-		t.Error("sandbox clients should be the Client's shared clients")
+	if sbx1.apiCli != c.apiCli || sbx1.httpCli != c.dataCli {
+		t.Error("sandbox clients should reuse Client's shared apiCli and dataCli")
+	}
+	if c.HTTPClient() != c.httpCli {
+		t.Error("Client.HTTPClient() should return control-plane HTTP client")
+	}
+	if c.HTTPClient().Timeout != DefaultRequestTimeout {
+		t.Errorf("control-plane HTTP client timeout = %v, want %v", c.HTTPClient().Timeout, DefaultRequestTimeout)
+	}
+	if sbx1.httpCli.Timeout != 0 {
+		t.Errorf("data-plane HTTP client timeout = %v, want 0 (unbounded streams)", sbx1.httpCli.Timeout)
 	}
 }
 
@@ -113,8 +119,6 @@ func TestClientCreateIgnoresOptsConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	// A bogus APIURL in opts.Config must be ignored: the request still hits
-	// the mock server backing the Client.
 	if _, err := c.Create(context.Background(), CreateOptions{
 		Config: Config{APIURL: "http://wrong.invalid"},
 	}); err != nil {
@@ -136,7 +140,6 @@ func TestListPaginatesViaNextTokenHeader(t *testing.T) {
 			w.Header().Set("x-next-token", "tok-2")
 			writeJSON(t, w, http.StatusOK, []map[string]any{fakeListedSandbox("sbx-1")})
 		case "tok-2":
-			// no x-next-token header -> last page
 			writeJSON(t, w, http.StatusOK, []map[string]any{fakeListedSandbox("sbx-2")})
 		default:
 			t.Errorf("unexpected nextToken: %q", r.URL.Query().Get("nextToken"))
@@ -208,12 +211,9 @@ func TestListSendsMetadataAndStateParams(t *testing.T) {
 		if got := q.Get("limit"); got != "50" {
 			t.Errorf("limit=%q want 50", got)
 		}
-		// State is form/explode=false -> comma-joined single value.
 		if states := q["state"]; len(states) == 0 || !strings.Contains(strings.Join(states, ","), "running") {
 			t.Errorf("state=%v want running", states)
 		}
-		// metadata arrives URL-decoded once by net/url; the inner per-pair
-		// encoding survives, so we still see "k=v" joined by "&".
 		md := q.Get("metadata")
 		if !strings.Contains(md, "user=abc") || !strings.Contains(md, "app=prod") {
 			t.Errorf("metadata=%q want user=abc & app=prod", md)
@@ -318,7 +318,6 @@ func TestSandboxInfoFromListed(t *testing.T) {
 	if len(info.VolumeMounts) != 1 || info.VolumeMounts[0].Name != "data" {
 		t.Fatalf("mounts: %+v", info.VolumeMounts)
 	}
-	// Fields absent from ListedSandbox must stay zero.
 	if info.Domain != "" || info.EnvdAccessToken != "" || info.Network != nil || info.Lifecycle != nil {
 		t.Fatalf("absent fields should be zero: %+v", info)
 	}

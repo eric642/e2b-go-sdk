@@ -1,6 +1,10 @@
 package e2b
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestAllTrafficCIDR(t *testing.T) {
 	if AllTraffic != "0.0.0.0/0" {
@@ -8,32 +12,41 @@ func TestAllTrafficCIDR(t *testing.T) {
 	}
 }
 
-func TestNetworkOptionsZeroValue(t *testing.T) {
-	// A zero-valued NetworkOptions must be a usable (no-op) policy. If any
-	// fields were accidentally required we'd know because constructing
-	// NetworkOptions{} would fail a compilation.
-	var opts NetworkOptions
-	if len(opts.AllowOut)+len(opts.DenyOut) != 0 {
-		t.Fatal("slices must default to empty")
+func TestNetworkOptionsOmitsUnsetAllowPublicTraffic(t *testing.T) {
+	cfg, err := buildNetworkConfig(&NetworkOptions{
+		DenyOut: []string{AllTraffic},
+	})
+	if err != nil {
+		t.Fatalf("buildNetworkConfig: %v", err)
 	}
-	if opts.AllowPublicTraffic {
-		t.Fatal("AllowPublicTraffic must default to false")
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
 	}
-	if opts.MaskRequestHost != "" {
-		t.Fatal("MaskRequestHost must default to empty")
+	if strings.Contains(string(raw), "allowPublicTraffic") {
+		t.Fatalf("omitted AllowPublicTraffic must not serialize allowPublicTraffic, got %s", raw)
 	}
-}
 
-func TestLifecycleOptionsZeroValue(t *testing.T) {
-	var l LifecycleOptions
-	if l.OnTimeout != "" || l.AutoResume {
-		t.Fatalf("LifecycleOptions must have zero defaults, got %+v", l)
+	boolFn := Bool
+	if got := boolFn(true); got == nil || !*got {
+		t.Fatalf("Bool(true) = %v", got)
 	}
-}
 
-func TestVolumeMountZeroValue(t *testing.T) {
-	var v VolumeMount
-	if v.Name != "" || v.Path != "" {
-		t.Fatalf("VolumeMount must have zero defaults, got %+v", v)
+	cfgExplicitFalse, err := buildNetworkConfig(&NetworkOptions{
+		AllowPublicTraffic: new(false),
+		DNSServers:         []string{},
+	})
+	if err != nil {
+		t.Fatalf("buildNetworkConfig: %v", err)
+	}
+	rawFalse, err := json.Marshal(cfgExplicitFalse)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if !strings.Contains(string(rawFalse), `"allowPublicTraffic":false`) {
+		t.Fatalf("explicit Bool(false) must serialize allowPublicTraffic:false, got %s", rawFalse)
+	}
+	if !strings.Contains(string(rawFalse), `"dnsServers":[]`) {
+		t.Fatalf("explicit empty DNSServers must serialize dnsServers:[], got %s", rawFalse)
 	}
 }

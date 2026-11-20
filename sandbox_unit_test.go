@@ -15,8 +15,6 @@ import (
 	apiclient "github.com/eric642/e2b-go-sdk/internal/api"
 )
 
-// assertAuthHeader verifies every REST request carries the expected API key
-// and no leftover headers. Call from inside an httptest handler.
 func assertAuthHeader(t *testing.T, r *http.Request, wantAPIKey string) {
 	t.Helper()
 	if got := r.Header.Get("X-API-Key"); got != wantAPIKey {
@@ -44,8 +42,6 @@ func writeJSON(t *testing.T, w http.ResponseWriter, status int, body any) {
 	}
 }
 
-// fakeSandboxResponse is the upstream Sandbox shape. Must match the OpenAPI
-// model; captured in internal/api/client.gen.go.
 func fakeSandboxResponse(id, domain, envdTok, trafficTok string) map[string]any {
 	return map[string]any{
 		"sandboxID":          id,
@@ -59,32 +55,41 @@ func fakeSandboxResponse(id, domain, envdTok, trafficTok string) map[string]any 
 }
 
 func TestSandboxCreateSendsFullBody(t *testing.T) {
-	var gotBody apiclient.NewSandbox
+	var gotBody apiclient.NewSandboxV2
+	var gotIdemKey string
 	mock := newRESTMock(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assertAuthHeader(t, r, "test-key")
-		if r.Method != http.MethodPost || r.URL.Path != "/sandboxes" {
+		if r.Method != http.MethodPost || r.URL.Path != "/v2/sandboxes" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
+		gotIdemKey = r.Header.Get("Idempotency-Key")
 		readJSON(t, r, &gotBody)
 		writeJSON(t, w, http.StatusCreated, fakeSandboxResponse("sbx-xyz", "example.com", "envd-tok", "traffic-tok"))
 	}))
 
+	cpus := int32(4)
 	_, err := Create(context.Background(), CreateOptions{
 		Config:                 mock.Config,
 		Template:               "ubuntu-22-04",
 		Timeout:                2 * time.Minute,
+		IdempotencyKey:         "idem-key-123",
+		CPUCount:               &cpus,
 		Metadata:               map[string]string{"team": "sdk"},
 		Envs:                   map[string]string{"FOO": "bar"},
-		Secure:                 true,
 		AllowInternetAccess:    false,
 		AllowInternetAccessSet: true,
 		Network: &NetworkOptions{
 			AllowOut:           []string{"10.0.0.0/8"},
 			DenyOut:            []string{"8.8.8.8/32"},
-			AllowPublicTraffic: true,
+			AllowPublicTraffic: new(true),
 			MaskRequestHost:    "mask.example.com",
 		},
-		Lifecycle: &LifecycleOptions{OnTimeout: "pause", AutoResume: true},
+		Lifecycle: &LifecycleOptions{OnTimeout: "pause", Mode: SnapshotModeFull, AutoResume: true},
+		Iam: &IamOptions{
+			Tokens: map[string]IamToken{
+				"aws": {Audience: "sts.amazonaws.com", TokenType: "JWT-SVID"},
+			},
+		},
 		VolumeMounts: []VolumeMount{
 			{Name: "data", Path: "/mnt/data"},
 		},
@@ -93,20 +98,23 @@ func TestSandboxCreateSendsFullBody(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
+	if gotIdemKey != "idem-key-123" {
+		t.Fatalf("Idempotency-Key: %q", gotIdemKey)
+	}
 	if gotBody.TemplateID != "ubuntu-22-04" {
 		t.Fatalf("TemplateID: %q", gotBody.TemplateID)
 	}
 	if gotBody.Timeout == nil || *gotBody.Timeout != 120 {
 		t.Fatalf("Timeout: %+v", gotBody.Timeout)
 	}
+	if gotBody.CpuCount == nil || *gotBody.CpuCount != 4 {
+		t.Fatalf("CpuCount: %+v", gotBody.CpuCount)
+	}
 	if gotBody.Metadata == nil || (*gotBody.Metadata)["team"] != "sdk" {
 		t.Fatalf("Metadata: %+v", gotBody.Metadata)
 	}
 	if gotBody.EnvVars == nil || (*gotBody.EnvVars)["FOO"] != "bar" {
 		t.Fatalf("EnvVars: %+v", gotBody.EnvVars)
-	}
-	if gotBody.Secure == nil || !*gotBody.Secure {
-		t.Fatalf("Secure: %+v", gotBody.Secure)
 	}
 	if gotBody.AllowInternetAccess == nil || *gotBody.AllowInternetAccess {
 		t.Fatalf("AllowInternetAccess: %+v", gotBody.AllowInternetAccess)
@@ -121,11 +129,47 @@ func TestSandboxCreateSendsFullBody(t *testing.T) {
 	if gotBody.AutoPause == nil || !*gotBody.AutoPause {
 		t.Fatalf("AutoPause expected true for Lifecycle.OnTimeout=pause: %+v", gotBody.AutoPause)
 	}
+	if gotBody.AutoPauseMemory == nil || !*gotBody.AutoPauseMemory {
+		t.Fatalf("AutoPauseMemory expected true for Mode=full: %+v", gotBody.AutoPauseMemory)
+	}
 	if gotBody.AutoResume == nil || !gotBody.AutoResume.Enabled {
 		t.Fatalf("AutoResume: %+v", gotBody.AutoResume)
 	}
+	if gotBody.Iam == nil || gotBody.Iam.Tokens == nil || (*gotBody.Iam.Tokens)["aws"].Audience != "sts.amazonaws.com" {
+		t.Fatalf("Iam: %+v", gotBody.Iam)
+	}
 	if gotBody.VolumeMounts == nil || (*gotBody.VolumeMounts)[0].Name != "data" {
 		t.Fatalf("VolumeMounts: %+v", gotBody.VolumeMounts)
+	}
+}
+
+func TestSandboxCreateV1DefaultsSecureTrueAndHonorsInsecure(t *testing.T) {
+	var gotBodies []apiclient.NewSandbox
+	mock := newRESTMock(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertAuthHeader(t, r, "test-key")
+		if r.Method != http.MethodPost || r.URL.Path != "/sandboxes" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var b apiclient.NewSandbox
+		readJSON(t, r, &b)
+		gotBodies = append(gotBodies, b)
+		writeJSON(t, w, http.StatusCreated, fakeSandboxResponse("sbx-v1", "example.com", "envd-tok", "traffic-tok"))
+	}))
+
+	if _, err := CreateV1(context.Background(), CreateOptions{Config: mock.Config}); err != nil {
+		t.Fatalf("CreateV1 default: %v", err)
+	}
+	if _, err := CreateV1(context.Background(), CreateOptions{Config: mock.Config, Insecure: true}); err != nil {
+		t.Fatalf("CreateV1 insecure: %v", err)
+	}
+	if len(gotBodies) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(gotBodies))
+	}
+	if gotBodies[0].Secure == nil || !*gotBodies[0].Secure {
+		t.Fatalf("CreateV1 must default secure=true, got %+v", gotBodies[0].Secure)
+	}
+	if gotBodies[1].Secure == nil || *gotBodies[1].Secure {
+		t.Fatalf("CreateV1 Insecure=true must send secure=false, got %+v", gotBodies[1].Secure)
 	}
 }
 
@@ -169,7 +213,6 @@ func TestSandboxCreateDefaultsTemplateAndTimeout(t *testing.T) {
 	if gotBody.Timeout == nil || *gotBody.Timeout != int32(DefaultSandboxTimeout/time.Second) {
 		t.Fatalf("default Timeout wrong: %+v", gotBody.Timeout)
 	}
-	// AllowInternetAccess not opted into → should be omitted (nil).
 	if gotBody.AllowInternetAccess != nil {
 		t.Fatalf("AllowInternetAccess should be nil when AllowInternetAccessSet=false, got %+v", gotBody.AllowInternetAccess)
 	}
@@ -232,7 +275,31 @@ func TestSandboxCreateMapsHTTPErrors(t *testing.T) {
 	}
 }
 
-func TestSandboxConnectUsesDefaultTimeout(t *testing.T) {
+func TestSandboxConnectOmitsDefaultTimeoutOnV2(t *testing.T) {
+	var gotBody apiclient.ConnectSandboxV2
+	mock := newRESTMock(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/sandboxes/sbx-1/connect" {
+			t.Errorf("path: %s", r.URL.Path)
+		}
+		readJSON(t, r, &gotBody)
+		writeJSON(t, w, http.StatusCreated, fakeSandboxResponse("sbx-1", "example.com", "", ""))
+	}))
+	sbx, err := Connect(context.Background(), "sbx-1", ConnectOptions{Config: mock.Config})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotBody.Timeout != nil {
+		t.Fatalf("v2 Connect should omit timeout when <= 0 so server default applies, got %v", *gotBody.Timeout)
+	}
+	if gotBody.Memory != nil {
+		t.Fatalf("v2 Connect should omit memory when OnResume is empty, got %v", *gotBody.Memory)
+	}
+	if sbx.ID != "sbx-1" {
+		t.Fatalf("id: %q", sbx.ID)
+	}
+}
+
+func TestSandboxConnectV1UsesDefaultTimeout(t *testing.T) {
 	var gotBody apiclient.ConnectSandbox
 	mock := newRESTMock(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/sandboxes/sbx-1/connect" {
@@ -241,7 +308,7 @@ func TestSandboxConnectUsesDefaultTimeout(t *testing.T) {
 		readJSON(t, r, &gotBody)
 		writeJSON(t, w, http.StatusCreated, fakeSandboxResponse("sbx-1", "example.com", "", ""))
 	}))
-	sbx, err := Connect(context.Background(), "sbx-1", ConnectOptions{Config: mock.Config})
+	sbx, err := ConnectV1(context.Background(), "sbx-1", ConnectOptions{Config: mock.Config})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +322,7 @@ func TestSandboxConnectUsesDefaultTimeout(t *testing.T) {
 
 func TestSandboxConnectAcceptsOKResponse(t *testing.T) {
 	mock := newRESTMock(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/sandboxes/sbx-1/connect" {
+		if r.URL.Path != "/v2/sandboxes/sbx-1/connect" {
 			t.Errorf("path: %s", r.URL.Path)
 		}
 		writeJSON(t, w, http.StatusOK, fakeSandboxResponse("sbx-1", "example.com", "", ""))
@@ -323,7 +390,6 @@ func TestPkgKillServerError(t *testing.T) {
 }
 
 func TestPkgKillDebugShortCircuits(t *testing.T) {
-	// Debug=true must never hit the network.
 	ok, err := Kill(context.Background(), "sbx", ConnectOptions{Config: Config{Debug: true}})
 	if err != nil {
 		t.Fatal(err)
@@ -358,16 +424,14 @@ func TestSandboxSetTimeoutDebugNoop(t *testing.T) {
 }
 
 func TestSandboxKillBranches(t *testing.T) {
-	// Two handlers routed by method/status so we can run each branch.
 	cases := []struct {
 		name   string
 		status int
-		wantOK bool
 		expErr bool
 	}{
-		{"Running", 200, true, false},
-		{"NotFound", 404, true, false}, // Kill() returns nil error; there's no bool
-		{"InternalError", 500, false, true},
+		{"Running", 200, false},
+		{"NotFound", 404, false},
+		{"InternalError", 500, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -386,7 +450,6 @@ func TestSandboxKillBranches(t *testing.T) {
 }
 
 func TestSandboxPause(t *testing.T) {
-	// 200 → true, 409 → false+nil, 500 → error.
 	cases := []struct {
 		status int
 		wantOK bool
@@ -394,7 +457,7 @@ func TestSandboxPause(t *testing.T) {
 	}{
 		{200, true, false},
 		{409, false, false},
-		{500, true, true}, // wantOK unused when expErr
+		{500, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(http.StatusText(tc.status), func(t *testing.T) {
@@ -641,9 +704,6 @@ func TestSandboxURLUsesExplicitSandboxURL(t *testing.T) {
 	}
 }
 
-// newFakeSandboxWithServer builds a *Sandbox whose apiCli points at an
-// httptest server. Envd isn't initialised — do not use for methods that
-// touch Commands/Files/Pty/Git.
 func newFakeSandboxWithServer(t *testing.T, h http.Handler) *Sandbox {
 	t.Helper()
 	mock := newRESTMock(t, h)

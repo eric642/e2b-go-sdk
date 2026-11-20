@@ -1,10 +1,12 @@
-// Package template provides a fluent builder and a Client for building E2B
-// sandbox templates. It mirrors the public surface of the Python Template
-// and JS TemplateBase classes.
+// Package template provides a fluent builder and a Client for building and
+// managing E2B sandbox templates. It mirrors the public surface of the Python
+// Template and JS TemplateBase classes while preserving legacy endpoints for
+// self-hosted E2B deployments.
 //
 // A Builder accumulates instructions and can be serialized with ToDockerfile
 // or ToJSON. To register a template with the E2B backend, construct a
-// Client via NewClient and call Build / BuildStream / BuildInBackground.
+// Client via NewClient and call Build / BuildStream / BuildInBackground (or
+// BuildV2 / BuildStreamV2 / BuildInBackgroundV2 on legacy self-hosted E2B).
 // Client methods honor context cancellation and are safe for concurrent use;
 // a *Builder is not — construct one per goroutine.
 package template
@@ -12,45 +14,36 @@ package template
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	e2b "github.com/eric642/e2b-go-sdk"
 	apiclient "github.com/eric642/e2b-go-sdk/internal/api"
 )
 
-// instType enumerates the kinds of instructions the Builder can record. It
-// maps 1:1 to the server-side TemplateStep.Type string (except for instTypeRaw
-// which is internal to ToDockerfile rendering).
 type instType string
 
 const (
-	instTypeRun     instType = "RUN"
-	instTypeCopy    instType = "COPY"
-	instTypeWorkdir instType = "WORKDIR"
-	instTypeEnv     instType = "ENV"
-	instTypeUser    instType = "USER"
-	instTypeExpose  instType = "EXPOSE"
-	// instTypeRaw is an internal-only marker for raw Dockerfile text. No code
-	// path produces it after FromDockerfile was redirected to the parser;
-	// the ToDockerfile() case is kept for backward compatibility with
-	// callers that may construct instruction{Type: instTypeRaw, ...} by hand.
-	instTypeRaw instType = "__raw"
+	instTypeRun        instType = "RUN"
+	instTypeCopy       instType = "COPY"
+	instTypeWorkdir    instType = "WORKDIR"
+	instTypeEnv        instType = "ENV"
+	instTypeUser       instType = "USER"
+	instTypeExpose     instType = "EXPOSE"
+	instTypeEntrypoint instType = "ENTRYPOINT"
 )
 
-// defaultResolveSymlinks is the default for per-COPY symlink resolution when
-// callers don't opt in. Kept as a package-level constant for parity with the
-// Python SDK.
 const defaultResolveSymlinks = false
 
-// instruction is a structured record of a single builder step.
 type instruction struct {
 	Type            instType
 	Args            []string
 	Force           bool
 	ForceUpload     bool
-	HasForceUpload  bool // whether ForceUpload was explicitly set
+	HasForceUpload  bool
 	ResolveSymlinks *bool
 	FilesHash       string
 }
@@ -64,20 +57,19 @@ type Builder struct {
 	startCmd     string
 	readyCmd     string
 	instructions []instruction
-	envs         map[string]string
-	workdir      string
 	tag          string
 
-	// Build-context and server-side build state.
 	contextDir     string
 	ignorePatterns []string
+	force          bool
 	forceNextLayer bool
 	err            error
 	registryConfig *apiclient.FromImageRegistry
 }
 
-// New returns an empty builder. Use FromImage / FromDockerfile to specify a
-// base.
+// New returns an empty builder initialized with the default "e2bdev/base"
+// base image. Use FromImage, FromTemplate, or FromDockerfileContent to select
+// another base.
 func New() *Builder {
 	return &Builder{baseImage: "e2bdev/base"}
 }
@@ -96,6 +88,9 @@ func (b *Builder) FromImage(image string, creds ...RegistryCredentials) *Builder
 	b.baseImage = image
 	b.baseTemplate = ""
 	b.registryConfig = nil
+	if b.forceNextLayer {
+		b.force = true
+	}
 	if len(creds) > 0 && (creds[0].Username != "" || creds[0].Password != "") {
 		reg := &apiclient.FromImageRegistry{}
 		if err := reg.FromGeneralRegistry(apiclient.GeneralRegistry{
@@ -116,6 +111,9 @@ func (b *Builder) FromImage(image string, creds ...RegistryCredentials) *Builder
 func (b *Builder) FromAWSRegistry(image, accessKeyID, secretAccessKey, region string) *Builder {
 	b.baseImage = image
 	b.baseTemplate = ""
+	if b.forceNextLayer {
+		b.force = true
+	}
 	reg := &apiclient.FromImageRegistry{}
 	if err := reg.FromAWSRegistry(apiclient.AWSRegistry{
 		AwsAccessKeyId:     accessKeyID,
@@ -136,6 +134,9 @@ func (b *Builder) FromAWSRegistry(image, accessKeyID, secretAccessKey, region st
 func (b *Builder) FromGCPRegistry(image, serviceAccountJSON string) *Builder {
 	b.baseImage = image
 	b.baseTemplate = ""
+	if b.forceNextLayer {
+		b.force = true
+	}
 	reg := &apiclient.FromImageRegistry{}
 	if err := reg.FromGCPRegistry(apiclient.GCPRegistry{
 		ServiceAccountJson: serviceAccountJSON,
@@ -163,7 +164,7 @@ func (b *Builder) FromPythonImage(tag string) *Builder {
 	return b.FromImage("python:" + tag)
 }
 
-// FromNodeImage uses the official node image.
+// FromNodeImage uses the official node image (default tag "lts").
 func (b *Builder) FromNodeImage(tag string) *Builder {
 	if tag == "" {
 		tag = "lts"
@@ -171,7 +172,7 @@ func (b *Builder) FromNodeImage(tag string) *Builder {
 	return b.FromImage("node:" + tag)
 }
 
-// FromGoImage uses the official golang image.
+// FromGoImage uses the official golang image (default tag "1").
 func (b *Builder) FromGoImage(tag string) *Builder {
 	if tag == "" {
 		tag = "1"
@@ -197,6 +198,33 @@ func (b *Builder) FromUbuntuImage(variant string) *Builder {
 	return b.FromImage("ubuntu:" + variant)
 }
 
+// FromFedoraImage starts a template from an official Fedora image. The
+// default variant is "44".
+func (b *Builder) FromFedoraImage(variant string) *Builder {
+	if variant == "" {
+		variant = "44"
+	}
+	return b.FromImage("fedora:" + variant)
+}
+
+// FromAlpineImage starts a template from an official Alpine image. The
+// default variant is "3.24".
+func (b *Builder) FromAlpineImage(variant string) *Builder {
+	if variant == "" {
+		variant = "3.24"
+	}
+	return b.FromImage("alpine:" + variant)
+}
+
+// FromArchImage starts a template from an official Arch Linux image. The
+// default variant is "latest".
+func (b *Builder) FromArchImage(variant string) *Builder {
+	if variant == "" {
+		variant = "latest"
+	}
+	return b.FromImage("archlinux:" + variant)
+}
+
 // FromBunImage starts a template from an official Bun image. The default
 // variant is "latest".
 func (b *Builder) FromBunImage(variant string) *Builder {
@@ -210,6 +238,10 @@ func (b *Builder) FromBunImage(variant string) *Builder {
 func (b *Builder) FromTemplate(templateID string) *Builder {
 	b.baseTemplate = templateID
 	b.baseImage = ""
+	b.registryConfig = nil
+	if b.forceNextLayer {
+		b.force = true
+	}
 	return b
 }
 
@@ -236,7 +268,7 @@ func (b *Builder) WithIgnore(patterns ...string) *Builder {
 
 // Run adds a RUN instruction.
 func (b *Builder) Run(cmd string) *Builder {
-	b.instructions = append(b.instructions, instruction{Type: instTypeRun, Args: []string{cmd}, Force: b.consumeForce()})
+	b.instructions = append(b.instructions, instruction{Type: instTypeRun, Args: []string{cmd}, Force: b.forceNextLayer})
 	return b
 }
 
@@ -294,8 +326,6 @@ func WithCopyResolveSymlinks(b bool) CopyOption {
 	}
 }
 
-// validateRelativePath rejects absolute paths and paths that escape the
-// build context directory.
 func validateRelativePath(src string) error {
 	if filepath.IsAbs(src) {
 		return &e2b.InvalidArgumentError{Message: fmt.Sprintf("copy src %q must be a relative path", src)}
@@ -332,7 +362,7 @@ func (b *Builder) Copy(src, dst string, opts ...CopyOption) *Builder {
 	b.instructions = append(b.instructions, instruction{
 		Type:            instTypeCopy,
 		Args:            []string{src, dst, o.user, modeStr},
-		Force:           b.consumeForce(),
+		Force:           o.forceUpload || b.forceNextLayer,
 		ForceUpload:     o.forceUpload,
 		HasForceUpload:  o.hasForceUpload,
 		ResolveSymlinks: o.resolveSymlinks,
@@ -365,38 +395,33 @@ func (b *Builder) CopyItems(items []CopyItem) *Builder {
 // Workdir sets the working directory. It records a WORKDIR instruction and
 // persists the value for later fluent calls.
 func (b *Builder) Workdir(path string) *Builder {
-	b.workdir = path
-	b.instructions = append(b.instructions, instruction{Type: instTypeWorkdir, Args: []string{path}, Force: b.consumeForce()})
-	return b
+	return b.SetWorkdir(path)
 }
 
 // Env sets an environment variable.
 func (b *Builder) Env(key, value string) *Builder {
-	if b.envs == nil {
-		b.envs = map[string]string{}
-	}
-	b.envs[key] = value
-	b.instructions = append(b.instructions, instruction{Type: instTypeEnv, Args: []string{key, value}, Force: b.consumeForce()})
+	b.instructions = append(b.instructions, instruction{Type: instTypeEnv, Args: []string{key, value}, Force: b.forceNextLayer})
 	return b
 }
 
 // Expose documents a port.
 func (b *Builder) Expose(port int) *Builder {
-	b.instructions = append(b.instructions, instruction{Type: instTypeExpose, Args: []string{fmt.Sprintf("%d", port)}, Force: b.consumeForce()})
+	b.instructions = append(b.instructions, instruction{Type: instTypeExpose, Args: []string{fmt.Sprintf("%d", port)}, Force: b.forceNextLayer})
 	return b
 }
 
 // Entrypoint sets the container entrypoint. Retained for Dockerfile-level
-// parity; the server build API has no direct ENTRYPOINT step, so serialize()
-// does not emit one.
+// parity; the server build API has no direct ENTRYPOINT step.
 func (b *Builder) Entrypoint(cmd string) *Builder {
-	b.instructions = append(b.instructions, instruction{Type: instType("ENTRYPOINT"), Args: []string{cmd}, Force: b.consumeForce()})
+	b.instructions = append(b.instructions, instruction{Type: instTypeEntrypoint, Args: []string{cmd}, Force: b.forceNextLayer})
 	return b
 }
 
-// SkipCache marks the next instruction as force-rebuilt, ignoring the
-// upstream cache. Chain before any instruction to invalidate just that
-// layer; the flag resets after the next instruction is added.
+// SkipCache marks all subsequent instructions added to this Builder as
+// force-rebuilt (sticky, matching upstream JS/Python forceNextLayer),
+// invalidating cached layers from this point forward. If a FROM method
+// (FromImage, FromTemplate, etc.) is called after SkipCache, the entire
+// template build is marked Force.
 func (b *Builder) SkipCache() *Builder {
 	b.forceNextLayer = true
 	return b
@@ -463,11 +488,6 @@ func (b *Builder) ToDockerfile() (string, error) {
 	}
 	for _, ins := range b.instructions {
 		switch ins.Type {
-		case instTypeRaw:
-			sb.WriteString(ins.Args[0])
-			if !strings.HasSuffix(ins.Args[0], "\n") {
-				sb.WriteByte('\n')
-			}
 		case instTypeRun:
 			fmt.Fprintf(&sb, "RUN %s\n", ins.Args[0])
 		case instTypeCopy:
@@ -475,28 +495,20 @@ func (b *Builder) ToDockerfile() (string, error) {
 		case instTypeWorkdir:
 			fmt.Fprintf(&sb, "WORKDIR %s\n", ins.Args[0])
 		case instTypeEnv:
-			fmt.Fprintf(&sb, "ENV %s=%q\n", ins.Args[0], ins.Args[1])
+			for i := 0; i+1 < len(ins.Args); i += 2 {
+				fmt.Fprintf(&sb, "ENV %s=%q\n", ins.Args[i], ins.Args[i+1])
+			}
+		case instTypeUser:
+			fmt.Fprintf(&sb, "USER %s\n", ins.Args[0])
 		case instTypeExpose:
 			fmt.Fprintf(&sb, "EXPOSE %s\n", ins.Args[0])
-		case instType("ENTRYPOINT"):
+		case instTypeEntrypoint:
 			fmt.Fprintf(&sb, "ENTRYPOINT %s\n", ins.Args[0])
 		}
 	}
 	return sb.String(), nil
 }
 
-// consumeForce returns the current per-layer force flag and resets it.
-// Called by every method that appends an instruction, so SkipCache() only
-// marks the immediately following instruction.
-func (b *Builder) consumeForce() bool {
-	f := b.forceNextLayer
-	b.forceNextLayer = false
-	return f
-}
-
-// runAs appends a RUN instruction with an optional user argument. The user,
-// when provided, becomes Args[1] so later serialization can route it to the
-// server's RUN step user field.
 func (b *Builder) runAs(cmd, user string) *Builder {
 	args := []string{cmd}
 	if user != "" {
@@ -505,12 +517,10 @@ func (b *Builder) runAs(cmd, user string) *Builder {
 	b.instructions = append(b.instructions, instruction{
 		Type:  instTypeRun,
 		Args:  args,
-		Force: b.consumeForce(),
+		Force: b.forceNextLayer,
 	})
 	return b
 }
-
-// -- RunCmd / RunCmds -----------------------------------------------------
 
 // RunOption configures Builder.RunCmd and Builder.RunCmds.
 type RunOption func(*runOpts)
@@ -537,14 +547,12 @@ func (b *Builder) RunCmds(cmds []string, opts ...RunOption) *Builder {
 	return b.RunCmd(strings.Join(cmds, " && "), opts...)
 }
 
-// -- SetWorkdir / SetUser / SetEnvs --------------------------------------
-
 // SetWorkdir emits a WORKDIR instruction with the given path.
 func (b *Builder) SetWorkdir(path string) *Builder {
 	b.instructions = append(b.instructions, instruction{
 		Type:  instTypeWorkdir,
 		Args:  []string{path},
-		Force: b.consumeForce(),
+		Force: b.forceNextLayer,
 	})
 	return b
 }
@@ -554,30 +562,30 @@ func (b *Builder) SetUser(user string) *Builder {
 	b.instructions = append(b.instructions, instruction{
 		Type:  instTypeUser,
 		Args:  []string{user},
-		Force: b.consumeForce(),
+		Force: b.forceNextLayer,
 	})
 	return b
 }
 
 // SetEnvs emits a single ENV instruction whose Args interleave keys and
-// values (k1, v1, k2, v2, ...). An empty or nil map is a no-op.
+// values (k1, v1, k2, v2, ...) sorted ascending by key so Go map iteration
+// order never invalidates build layer caches. An empty or nil map is a no-op.
 func (b *Builder) SetEnvs(envs map[string]string) *Builder {
 	if len(envs) == 0 {
 		return b
 	}
-	args := make([]string, 0, 2*len(envs))
-	for k, v := range envs {
-		args = append(args, k, v)
+	keys := slices.Sorted(maps.Keys(envs))
+	args := make([]string, 0, 2*len(keys))
+	for _, k := range keys {
+		args = append(args, k, envs[k])
 	}
 	b.instructions = append(b.instructions, instruction{
 		Type:  instTypeEnv,
 		Args:  args,
-		Force: b.consumeForce(),
+		Force: b.forceNextLayer,
 	})
 	return b
 }
-
-// -- Remove ---------------------------------------------------------------
 
 // RemoveOption configures Builder.Remove.
 type RemoveOption func(*removeOpts)
@@ -611,11 +619,11 @@ func (b *Builder) Remove(paths []string, opts ...RemoveOption) *Builder {
 	if o.force {
 		cmd = append(cmd, "-f")
 	}
-	cmd = append(cmd, paths...)
+	for _, p := range paths {
+		cmd = append(cmd, shellQuote(p))
+	}
 	return b.runAs(strings.Join(cmd, " "), o.user)
 }
-
-// -- Rename ---------------------------------------------------------------
 
 // RenameOption configures Builder.Rename.
 type RenameOption func(*renameOpts)
@@ -638,14 +646,12 @@ func (b *Builder) Rename(src, dest string, opts ...RenameOption) *Builder {
 	for _, opt := range opts {
 		opt(&o)
 	}
-	cmd := []string{"mv", src, dest}
+	cmd := []string{"mv", shellQuote(src), shellQuote(dest)}
 	if o.force {
 		cmd = append(cmd, "-f")
 	}
 	return b.runAs(strings.Join(cmd, " "), o.user)
 }
-
-// -- MakeDir --------------------------------------------------------------
 
 // MkdirOption configures Builder.MakeDir.
 type MkdirOption func(*mkdirOpts)
@@ -673,11 +679,11 @@ func (b *Builder) MakeDir(paths []string, opts ...MkdirOption) *Builder {
 	if o.hasMode {
 		cmd = append(cmd, fmt.Sprintf("-m %04o", o.mode))
 	}
-	cmd = append(cmd, paths...)
+	for _, p := range paths {
+		cmd = append(cmd, shellQuote(p))
+	}
 	return b.runAs(strings.Join(cmd, " "), o.user)
 }
-
-// -- MakeSymlink ----------------------------------------------------------
 
 // SymlinkOption configures Builder.MakeSymlink.
 type SymlinkOption func(*symOpts)
@@ -705,11 +711,9 @@ func (b *Builder) MakeSymlink(src, dest string, opts ...SymlinkOption) *Builder 
 	if o.force {
 		cmd = append(cmd, "-f")
 	}
-	cmd = append(cmd, src, dest)
+	cmd = append(cmd, shellQuote(src), shellQuote(dest))
 	return b.runAs(strings.Join(cmd, " "), o.user)
 }
-
-// -- Pip ------------------------------------------------------------------
 
 // PipOption configures Builder.PipInstall.
 type PipOption func(*pipOpts)
@@ -743,8 +747,6 @@ func (b *Builder) PipInstall(packages []string, opts ...PipOption) *Builder {
 	}
 	return b.runAs(strings.Join(parts, " "), user)
 }
-
-// -- Npm ------------------------------------------------------------------
 
 // NpmOption configures Builder.NpmInstall.
 type NpmOption func(*npmOpts)
@@ -781,8 +783,6 @@ func (b *Builder) NpmInstall(packages []string, opts ...NpmOption) *Builder {
 	return b.runAs(strings.Join(parts, " "), user)
 }
 
-// -- Bun ------------------------------------------------------------------
-
 // BunOption configures Builder.BunInstall.
 type BunOption func(*bunOpts)
 type bunOpts struct{ global, dev bool }
@@ -818,8 +818,6 @@ func (b *Builder) BunInstall(packages []string, opts ...BunOption) *Builder {
 	return b.runAs(strings.Join(parts, " "), user)
 }
 
-// -- Apt ------------------------------------------------------------------
-
 // AptOption configures Builder.AptInstall.
 type AptOption func(*aptOpts)
 type aptOpts struct{ noRecommends, fixMissing bool }
@@ -835,9 +833,6 @@ func WithAptFixMissing() AptOption { return func(o *aptOpts) { o.fixMissing = tr
 // AptInstall emits the Python SDK's canonical
 // "apt-get update && apt-get install -y ..." one-liner so the update and
 // install share a single cache layer and partial updates never go stale.
-// Each flag literal carries its own trailing space; that space is consumed
-// by the space before the packages join, which is why no explicit
-// TrimRight is needed. Callers are expected to pass at least one package.
 func (b *Builder) AptInstall(packages []string, opts ...AptOption) *Builder {
 	o := aptOpts{}
 	for _, opt := range opts {
@@ -853,8 +848,6 @@ func (b *Builder) AptInstall(packages []string, opts ...AptOption) *Builder {
 	install := "DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes apt-get install -y " + flags + strings.Join(packages, " ")
 	return b.runAs("apt-get update && "+install, "root")
 }
-
-// -- Git clone ------------------------------------------------------------
 
 // GitCloneOption configures Builder.GitClone.
 type GitCloneOption func(*gitOpts)
@@ -887,26 +880,24 @@ func WithGitUser(user string) GitCloneOption {
 
 // GitClone emits a RUN that clones the given URL. Branch, depth, and path
 // options append their tokens in the order git expects (branch adds three
-// tokens, depth adds two, path adds one).
+// tokens, depth adds two, path adds one), shell-quoting unsafe tokens.
 func (b *Builder) GitClone(url string, opts ...GitCloneOption) *Builder {
 	o := gitOpts{}
 	for _, opt := range opts {
 		opt(&o)
 	}
-	parts := []string{"git", "clone", url}
+	parts := []string{"git", "clone", shellQuote(url)}
 	if o.branch != "" {
-		parts = append(parts, "--branch", o.branch, "--single-branch")
+		parts = append(parts, "--branch", shellQuote(o.branch), "--single-branch")
 	}
 	if o.depth > 0 {
 		parts = append(parts, "--depth", fmt.Sprint(o.depth))
 	}
 	if o.path != "" {
-		parts = append(parts, o.path)
+		parts = append(parts, shellQuote(o.path))
 	}
 	return b.runAs(strings.Join(parts, " "), o.user)
 }
-
-// -- Beta / base-template-specific methods -------------------------------
 
 // AddMCPServer adds one or more MCP servers using mcp-gateway. Only valid
 // when the builder was initialized with FromTemplate("mcp-gateway"); the
@@ -931,7 +922,7 @@ func (b *Builder) BetaDevContainerPrebuild(dir string) *Builder {
 		}
 		return b
 	}
-	return b.runAs("devcontainer build --workspace-folder "+dir, "root")
+	return b.runAs("devcontainer build --workspace-folder "+shellQuote(dir), "root")
 }
 
 // BetaSetDevContainerStart wires the devcontainer-specific start+ready
@@ -943,17 +934,27 @@ func (b *Builder) BetaSetDevContainerStart(dir string) *FinalBuilder {
 		}
 		return &FinalBuilder{b: b}
 	}
-	b.startCmd = "sudo devcontainer up --workspace-folder " + dir +
-		" && sudo /prepare-exec.sh " + dir +
+	quoted := shellQuote(dir)
+	b.startCmd = "sudo devcontainer up --workspace-folder " + quoted +
+		" && sudo /prepare-exec.sh " + quoted +
 		" | sudo tee /devcontainer.sh > /dev/null && sudo chmod +x /devcontainer.sh && sudo touch /devcontainer.up"
 	b.readyCmd = WaitForFile("/devcontainer.up").Cmd()
 	return &FinalBuilder{b: b}
 }
 
-// instructionsWithHashes returns a copy of b.instructions with FilesHash
-// populated for every COPY step. When any COPY exists but no build context is
-// configured it returns an InvalidArgumentError.
+func (b *Builder) combinedIgnores() []string {
+	ignore := append([]string(nil), b.ignorePatterns...)
+	if b.contextDir != "" {
+		ignore = append(ignore, readDockerignore(b.contextDir)...)
+	}
+	return ignore
+}
+
 func (b *Builder) instructionsWithHashes() ([]instruction, error) {
+	return b.instructionsWithHashesWithIgnores(b.combinedIgnores())
+}
+
+func (b *Builder) instructionsWithHashesWithIgnores(ignore []string) ([]instruction, error) {
 	out := make([]instruction, len(b.instructions))
 	copy(out, b.instructions)
 
@@ -966,14 +967,6 @@ func (b *Builder) instructionsWithHashes() ([]instruction, error) {
 	}
 	if hasCopy && b.contextDir == "" {
 		return nil, &e2b.InvalidArgumentError{Message: "COPY requires WithContext(dir) to be set on the builder"}
-	}
-
-	// Combine explicit ignore patterns with anything found in .dockerignore
-	// inside the context, mirroring the Python SDK. Caller-supplied patterns
-	// apply whether or not a context dir is set, so they are never dropped.
-	ignore := append([]string(nil), b.ignorePatterns...)
-	if b.contextDir != "" {
-		ignore = append(ignore, readDockerignore(b.contextDir)...)
 	}
 
 	for i := range out {
@@ -998,9 +991,6 @@ func (b *Builder) instructionsWithHashes() ([]instruction, error) {
 	return out, nil
 }
 
-// serialize converts the builder into the TemplateBuildStartV2 body expected
-// by the build API. It runs COPY hashing via instructionsWithHashes and
-// skips raw-Dockerfile entries which have no structured representation.
 func (b *Builder) serialize(force bool) (*apiclient.TemplateBuildStartV2, error) {
 	if b.err != nil {
 		return nil, b.err
@@ -1009,9 +999,16 @@ func (b *Builder) serialize(force bool) (*apiclient.TemplateBuildStartV2, error)
 	if err != nil {
 		return nil, err
 	}
+	return b.serializeSteps(steps, force)
+}
+
+func (b *Builder) serializeSteps(steps []instruction, force bool) (*apiclient.TemplateBuildStartV2, error) {
+	if b.err != nil {
+		return nil, b.err
+	}
 
 	body := &apiclient.TemplateBuildStartV2{}
-	if force {
+	if force || b.force {
 		f := true
 		body.Force = &f
 	}
@@ -1037,10 +1034,6 @@ func (b *Builder) serialize(force bool) (*apiclient.TemplateBuildStartV2, error)
 
 	apiSteps := make([]apiclient.TemplateStep, 0, len(steps))
 	for _, ins := range steps {
-		// Skip raw Dockerfile blobs: they have no TemplateStep mapping.
-		if ins.Type == instTypeRaw {
-			continue
-		}
 		step := apiclient.TemplateStep{Type: string(ins.Type)}
 		if len(ins.Args) > 0 {
 			args := make([]string, len(ins.Args))
@@ -1067,10 +1060,30 @@ type FinalBuilder struct {
 	b *Builder
 }
 
-// Builder returns the underlying *Builder. Use sparingly; the point of
-// FinalBuilder is to discourage adding more instructions. Required by the
-// Client so it can call serialize/instructionsWithHashes.
+// Builder returns the underlying *Builder.
 func (f *FinalBuilder) Builder() *Builder { return f.b }
+
+// SetTag tags the finalized template (e.g. "my-template:v2") without dropping
+// back to *Builder.
+func (f *FinalBuilder) SetTag(tag string) *FinalBuilder {
+	f.b.SetTag(tag)
+	return f
+}
+
+// StartCmd returns the configured start command.
+func (f *FinalBuilder) StartCmd() string { return f.b.StartCmd() }
+
+// ReadyCmdString returns the configured readiness command.
+func (f *FinalBuilder) ReadyCmdString() string { return f.b.ReadyCmdString() }
+
+// BaseImage returns the base image (empty when building on an E2B template).
+func (f *FinalBuilder) BaseImage() string { return f.b.BaseImage() }
+
+// BaseTemplate returns the base template ID (empty when building on an image).
+func (f *FinalBuilder) BaseTemplate() string { return f.b.BaseTemplate() }
+
+// Tag returns the tag associated with this template build.
+func (f *FinalBuilder) Tag() string { return f.b.Tag() }
 
 // ToDockerfile delegates to the underlying Builder.
 func (f *FinalBuilder) ToDockerfile() (string, error) { return f.b.ToDockerfile() }
