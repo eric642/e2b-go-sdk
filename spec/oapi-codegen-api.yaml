@@ -6,4 +6,4 @@ generate:
   strict-server: false
 output: internal/api/client.gen.go
 output-options:
-  skip-prune: true
+  skip-prune: false

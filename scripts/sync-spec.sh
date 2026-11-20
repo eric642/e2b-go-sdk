@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Sync E2B specs from the upstream submodule at a specific tag, then
-# regenerate client code.
+# Sync E2B specs from the upstream submodule at a specific tag into ./spec/
+# (read-only: the E2B submodule checkout is never modified).
 #
 # Usage:
-#   scripts/sync-spec.sh                         # sync to latest e2b tag
-#   scripts/sync-spec.sh e2b@2.19.0              # sync to explicit tag
-#   scripts/sync-spec.sh --ref main              # sync to a branch ref
+#   scripts/sync-spec.sh                         # sync to latest e2b@* tag
+#   scripts/sync-spec.sh e2b@2.64.0              # sync to explicit tag
+#   scripts/sync-spec.sh --ref main              # sync to a branch/commit ref
 #   scripts/sync-spec.sh --skip-fetch            # don't hit the network
 #
 # Environment:
@@ -14,10 +14,15 @@
 # The script:
 #   1. Ensures the E2B submodule is initialized
 #   2. Fetches tags and resolves the target ref (unless --skip-fetch)
-#   3. Checks out the submodule at that ref (detached HEAD)
-#   4. Copies spec files into ./spec/
+#   3. Extracts spec files at that ref via `git show <sha>:spec/...` into
+#      ./spec/ WITHOUT checking out or detaching the submodule (E2B/ is a
+#      read-only reference checkout)
+#   4. Filters the specs down to the SDK surface (scripts/filter_spec.go,
+#      mirroring upstream E2B/redocly.yaml)
 #   5. Writes spec/E2B_VERSION and internal/version/upstream.go
 #   6. Updates VERSION to match the upstream tag's semver
+#
+# Run `make codegen` afterwards to regenerate the clients under internal/.
 
 set -euo pipefail
 
@@ -29,8 +34,6 @@ VERSION_FILE="$REPO_ROOT/VERSION"
 
 log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
-
-# --- arg parsing -------------------------------------------------------------
 
 TAG=""
 USE_REF=false
@@ -50,11 +53,9 @@ while (( $# )); do
   esac
 done
 
-# --- preconditions -----------------------------------------------------------
-
 [[ -d "$SUBMODULE_DIR/.git" || -f "$SUBMODULE_DIR/.git" ]] || {
   log "initializing submodule"
-  git -C "$REPO_ROOT" submodule update --init --recursive
+  git -C "$REPO_ROOT" submodule update --init E2B
 }
 
 if $SKIP_FETCH; then
@@ -70,10 +71,7 @@ else
   fi
 fi
 
-# --- resolve target ----------------------------------------------------------
-
 if [[ -z "$TAG" ]]; then
-  # Pick the newest e2b tag by version sort.
   TAG="$(git -C "$SUBMODULE_DIR" tag --list 'e2b@*' --sort=-v:refname | head -n1)"
   [[ -n "$TAG" ]] || die "no e2b@* tags found; pass one explicitly"
   log "latest upstream tag: $TAG"
@@ -88,14 +86,10 @@ else
   RESOLVED="refs/tags/$TAG"
 fi
 
-log "checking out E2B at $RESOLVED"
-git -C "$SUBMODULE_DIR" checkout --quiet --detach "$RESOLVED"
-SUBMODULE_SHA="$(git -C "$SUBMODULE_DIR" rev-parse HEAD)"
+SUBMODULE_SHA="$(git -C "$SUBMODULE_DIR" rev-parse --verify "${RESOLVED}^{commit}")" \
+  || die "cannot resolve $RESOLVED to a commit"
+log "resolved $RESOLVED -> $SUBMODULE_SHA (submodule checkout left untouched)"
 
-# --- derive semver -----------------------------------------------------------
-# Upstream tags look like "python-sdk@2.20.0"; strip the prefix.
-# For non-tag refs we produce a pseudo-semver "0.0.0-dev+<short-sha>" so the
-# Go module can still be built, but it's obvious the checkout is unreleased.
 if [[ "$TAG" == *"@"* ]]; then
   SEMVER="${TAG##*@}"
 elif [[ "$TAG" =~ ^[0-9]+\.[0-9]+ ]]; then
@@ -104,17 +98,27 @@ else
   SEMVER="0.0.0-dev+${SUBMODULE_SHA:0:12}"
 fi
 
-# --- copy specs --------------------------------------------------------------
+extract() {
+  local src="$1" dst="$2"
+  git -C "$SUBMODULE_DIR" show "${SUBMODULE_SHA}:${src}" > "$dst.tmp" \
+    || { rm -f "$dst.tmp"; die "missing $src at $SUBMODULE_SHA"; }
+  mv "$dst.tmp" "$dst"
+}
 
-log "copying specs into $SPEC_DIR"
+log "extracting specs at ${SUBMODULE_SHA:0:12} into $SPEC_DIR"
 mkdir -p "$SPEC_DIR/envd/process" "$SPEC_DIR/envd/filesystem"
-cp "$SUBMODULE_DIR/spec/openapi.yml"                  "$SPEC_DIR/openapi.yml"
-cp "$SUBMODULE_DIR/spec/openapi-volumecontent.yml"    "$SPEC_DIR/openapi-volumecontent.yml"
-cp "$SUBMODULE_DIR/spec/envd/envd.yaml"               "$SPEC_DIR/envd/envd.yaml"
-cp "$SUBMODULE_DIR/spec/envd/process/process.proto"   "$SPEC_DIR/envd/process/process.proto"
-cp "$SUBMODULE_DIR/spec/envd/filesystem/filesystem.proto" "$SPEC_DIR/envd/filesystem/filesystem.proto"
+extract spec/openapi.yml                    "$SPEC_DIR/openapi.yml"
+extract spec/openapi-volumecontent.yml      "$SPEC_DIR/openapi-volumecontent.yml"
+extract spec/envd/envd.yaml                 "$SPEC_DIR/envd/envd.yaml"
+extract spec/envd/process/process.proto     "$SPEC_DIR/envd/process/process.proto"
+extract spec/envd/filesystem/filesystem.proto "$SPEC_DIR/envd/filesystem/filesystem.proto"
 
-# --- pin the version ---------------------------------------------------------
+log "filtering specs down to the SDK surface"
+(
+  cd "$REPO_ROOT"
+  go run ./scripts/filter_spec.go api      spec/openapi.yml
+  go run ./scripts/filter_spec.go internal spec/envd/envd.yaml spec/openapi-volumecontent.yml
+)
 
 log "pinning spec/E2B_VERSION to $TAG"
 cat > "$SPEC_DIR/E2B_VERSION" <<EOF
@@ -131,19 +135,21 @@ echo "$SEMVER" > "$VERSION_FILE"
 mkdir -p "$VERSION_PKG"
 cat > "$VERSION_PKG/upstream.go" <<EOF
 // Code generated by scripts/sync-spec.sh. DO NOT EDIT.
+
+// Package version pins the upstream E2B spec this SDK was generated from.
 package version
 
 // UpstreamTag is the git tag in e2b-dev/E2B whose spec generated this SDK.
 const UpstreamTag = "$TAG"
 
-// UpstreamSemver is the semver portion of UpstreamTag (e.g. "2.20.0").
+// UpstreamSemver is the semver portion of UpstreamTag (e.g. "2.64.0").
 const UpstreamSemver = "$SEMVER"
 
 // UpstreamCommit is the resolved E2B submodule commit.
 const UpstreamCommit = "$SUBMODULE_SHA"
 
 // SDKVersion is this Go SDK's release version; kept in lockstep with the
-// upstream python-sdk semver.
+// upstream e2b semver.
 const SDKVersion = "$SEMVER"
 EOF
 
