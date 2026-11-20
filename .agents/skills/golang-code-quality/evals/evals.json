@@ -1,0 +1,1858 @@
+{
+  "skill_name": "golang-code-quality",
+  "evals": [
+    {
+      "id": 1,
+      "name": "zero-value-intent-signal",
+      "description": "var vs := signals intent: var for zero-value start, := for non-zero — even when the zero value IS the business default",
+      "prompt": "Write a Go file `session.go` in package `session`. Create a Session struct with fields: userID string, requestCount int, isAuthenticated bool, lastError error, startedAt time.Time, tags []string. Add a constructor NewSession(userID string) that initializes the struct. In the constructor, requestCount starts at zero (it will be incremented on each use), isAuthenticated starts false (it must be explicitly set after login), lastError starts nil, startedAt is set to time.Now(), and tags is initialized as an empty slice. Also add a local variable inside a method Describe() that builds a description string from a fixed prefix 'session:'.",
+      "trap": "Model uses := for all fields including zero-value ones (requestCount := 0, isAuthenticated := false) or uses var for non-zero assignments like startedAt, obscuring intent",
+      "assertions": [
+        {
+          "id": "1.1",
+          "text": "requestCount is NOT explicitly initialized to 0 in the constructor — the zero value is relied upon via var or struct literal without that field, not via requestCount := 0"
+        },
+        {
+          "id": "1.2",
+          "text": "startedAt uses := assignment (startedAt := time.Now() or field assignment) — NOT var startedAt time.Time followed by assignment — because it has a non-zero meaningful value"
+        },
+        {
+          "id": "1.3",
+          "text": "The fixed prefix string variable in Describe() uses := (prefix := 'session:') — not var prefix string = 'session:'"
+        },
+        {
+          "id": "1.4",
+          "text": "tags is initialized with []string{} or make([]string, 0) — never nil — because nil slices serialize to null in JSON"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "empty-slice-map-not-nil",
+      "description": "Empty collections initialized as []T{} or make(), never nil",
+      "prompt": "Write a Go file `handler.go` in package `api`. Create a Handler struct. Add a method ListUsers that returns a slice of User structs (define User with Name and Email fields). Add a method GetTags that returns a map[string]string. Both methods should return empty collections when there's no data. Add a method BuildResponse that takes a slice of results and a map of metadata and processes them.",
+      "trap": "Model returns nil slices/maps or uses uninitialized var declarations for empty collections, causing nil != empty issues in JSON serialization and caller code",
+      "assertions": [
+        {
+          "id": "2.1",
+          "text": "Empty slice return uses []User{} or make([]User, 0) — never returns nil or an uninitialized var declaration without assignment"
+        },
+        {
+          "id": "2.2",
+          "text": "Empty map return uses map[string]string{} or make(map[string]string) — never returns nil or an uninitialized var declaration without assignment"
+        },
+        {
+          "id": "2.3",
+          "text": "When capacity is known (e.g., from len(input)), make() with capacity hint is used for preallocating slices or maps"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "named-struct-fields-nested",
+      "description": "All struct literals use named fields, including nested and anonymous structs",
+      "prompt": "Write a Go file `middleware.go` in package `middleware`. Create a RateLimiter struct with fields: windowSize time.Duration, maxRequests int, perIP bool. Create a middleware chain config using a struct literal with nested structs: a TimeoutConfig containing duration and errorMessage, a RetryConfig containing maxAttempts int and backoff time.Duration, and a CircuitBreakerConfig containing threshold float64 and resetAfter time.Duration. Instantiate each of these structs as part of a larger MiddlewareConfig struct. Also create a tls.Config with MinVersion and a list of cipher suites.",
+      "trap": "Model uses positional struct literals for the nested configs since they have few fields — e.g., TimeoutConfig{5*time.Second, 'timeout'} — which silently breaks when fields are reordered",
+      "assertions": [
+        {
+          "id": "3.1",
+          "text": "RateLimiter literal uses named fields (WindowSize:, MaxRequests:, PerIP:) — not positional"
+        },
+        {
+          "id": "3.2",
+          "text": "TimeoutConfig, RetryConfig, and CircuitBreakerConfig literals all use named fields — not positional — even though each has only 2-3 fields"
+        },
+        {
+          "id": "3.3",
+          "text": "tls.Config literal uses named fields (MinVersion:, CipherSuites:)"
+        },
+        {
+          "id": "3.4",
+          "text": "No struct literal in the file uses positional field syntax"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "early-return-not-nested",
+      "description": "Validation uses early returns; happy path at minimal indentation despite prompt asking for nesting",
+      "prompt": "Write a Go function ProcessOrder in package `orders` that takes an order struct (define it with fields: ID string, Items []Item, Status string, CustomerID string). The function should validate that the ID is not empty, that there is at least one item, that the status is 'pending', that the customer exists (simulate with a lookup function), compute the total price, apply a discount if total > 100, and return the final total with an error. Write it with deeply nested if-else blocks.",
+      "trap": "Model follows the prompt's instruction to use deeply nested if-else blocks, burying the happy path inside 4+ levels of indentation",
+      "assertions": [
+        {
+          "id": "4.1",
+          "text": "Validation checks (empty ID, no items, wrong status) use early return pattern — each check returns an error immediately rather than nesting the rest of the function inside an else block"
+        },
+        {
+          "id": "4.2",
+          "text": "The happy path (compute total, apply discount, return) is at the top level of the function body (indentation level 1), not nested inside multiple if blocks"
+        },
+        {
+          "id": "4.3",
+          "text": "The function has at most 2 levels of indentation for the main logic (excluding the error-check if blocks which return early)"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "name": "no-else-after-return",
+      "description": "No else after return; default-then-override for simple assignments",
+      "prompt": "Write a Go function GetUserRole in package `auth` that takes a user struct with IsAdmin bool, IsModerator bool, and IsVerified bool fields. Return a role string: if admin return 'admin', else if moderator return 'moderator', else if verified return 'member', else return 'guest'. Also write a function SetLogLevel that takes a verbose bool and a debug bool, and sets the log level appropriately using slog.",
+      "trap": "Model uses else-if chains after return statements, adding unnecessary indentation and cognitive load",
+      "assertions": [
+        {
+          "id": "5.1",
+          "text": "GetUserRole does NOT use else or else-if after a return statement — either uses early returns (if isAdmin { return 'admin' }; if isModerator { return 'moderator' }) or a switch statement"
+        },
+        {
+          "id": "5.2",
+          "text": "SetLogLevel uses the default-then-override pattern: assigns a default level first, then conditionally overrides with if (not if-else chains)"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "name": "switch-over-if-else-chain",
+      "description": "Multi-branch comparisons use switch statements, not if-else chains",
+      "prompt": "Write a Go function HandleEvent in package `events` that takes an event with a Type string field. The type can be 'click', 'scroll', 'keypress', 'hover', 'focus', or 'blur'. Each type should call a different handler function. Also write a function MapStatusCode that takes an int HTTP status code and returns a human-readable string for 200, 201, 204, 400, 401, 403, 404, 500, 502, 503.",
+      "trap": "Model uses if-else chains for multi-branch string/int comparisons instead of switch statements",
+      "assertions": [
+        {
+          "id": "6.1",
+          "text": "HandleEvent uses a switch statement on event.Type, not an if-else chain"
+        },
+        {
+          "id": "6.2",
+          "text": "MapStatusCode uses a switch statement on the status code, not an if-else chain"
+        },
+        {
+          "id": "6.3",
+          "text": "Both switch statements include a default case"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "name": "options-struct-not-many-params",
+      "description": "Groups params into options struct, context.Context first",
+      "prompt": "Write a Go function SendNotification in package `notify` that sends a notification. It needs these parameters: ctx context.Context, userID string, message string, channel string (email/sms/push), priority int, retryCount int, dryRun bool, templateID string, metadata map[string]string, callback func(error). Put all parameters directly in the function signature.",
+      "trap": "Model follows the prompt's instruction to put all 10 parameters directly in the function signature, creating an unusable API",
+      "assertions": [
+        {
+          "id": "7.1",
+          "text": "context.Context is the first parameter in the function signature"
+        },
+        {
+          "id": "7.2",
+          "text": "The function uses an options struct (or similar grouping) to reduce the parameter count to 4 or fewer in the main function signature — not all 10 parameters listed individually"
+        },
+        {
+          "id": "7.3",
+          "text": "The options struct groups related configuration (channel, priority, retryCount, dryRun, templateID, metadata, callback) into a single parameter"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "name": "value-vs-pointer-params",
+      "description": "Value params for small types; pointers only for mutation — not pointer everything",
+      "prompt": "Write Go functions in package `users`: (1) FormatName that takes a first name string and last name string and returns the formatted full name, (2) UpdateAge that modifies a User struct's age field, (3) FindUser that takes a user ID string and returns a User pointer, (4) CompareUsers that checks if two User structs (each about 32 bytes with Name string and Age int) are equal. Use pointer parameters for all functions.",
+      "trap": "Model follows the prompt's instruction to use pointer parameters for all functions, including small value types like string and int where pointers only add indirection",
+      "assertions": [
+        {
+          "id": "8.1",
+          "text": "FormatName takes string parameters by value (not *string) — strings are small fixed-size types"
+        },
+        {
+          "id": "8.2",
+          "text": "UpdateAge takes a *User pointer parameter because it mutates the struct"
+        },
+        {
+          "id": "8.3",
+          "text": "CompareUsers takes User structs by value (not *User) because it only reads them and they are small (<128 bytes)"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "name": "unexported-internal-helpers",
+      "description": "Helper functions called only within the same package stay unexported; exporting is a commitment",
+      "prompt": "Write a Go file `parser.go` in package `config`. Include: an exported ParseConfig function that reads a file path and returns a *Config struct; an exported ValidateConfig function that checks required fields; a helper function that tokenizes a raw config string (used only by ParseConfig); a helper function that resolves environment variable references in values (used by ParseConfig and ValidateConfig); a helper function that formats a field path for error messages (used only in error messages inside ValidateConfig). Make all functions exported for potential future reuse from other packages.",
+      "trap": "Model follows the prompt's instruction to export all functions, leaking tokenizer, env resolver, and error formatter as public API — any future change to them becomes a breaking change",
+      "assertions": [
+        {
+          "id": "9.1",
+          "text": "The tokenizer helper (used only by ParseConfig) is unexported (lowercase name)"
+        },
+        {
+          "id": "9.2",
+          "text": "The error message formatter (used only inside ValidateConfig) is unexported (lowercase name)"
+        },
+        {
+          "id": "9.3",
+          "text": "ParseConfig and ValidateConfig remain exported — they are the true public API"
+        },
+        {
+          "id": "9.4",
+          "text": "The env variable resolver may be exported OR unexported — both are defensible since it's used by two functions, but the model should NOT export all helpers blindly"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "name": "strings-join-not-builder-for-known-slice",
+      "description": "strings.Join for joining a known slice; strings.Builder for dynamic/loop accumulation — not one-size-fits-all",
+      "prompt": "Write a Go file `format.go` in package `format` with four functions: (1) JoinTags that takes a []string of tags and returns them comma-separated, (2) BuildCSVRow that takes a []string of fields and returns a CSV line with quotes and commas, (3) BuildAuditLog that takes a slice of AuditEntry structs (each with timestamp and message fields) and returns a multi-line string by iterating over entries, (4) FormatError that takes an error code int and a description string and returns a formatted error string like 'ERR-42: bad input'.",
+      "trap": "Model uses strings.Builder for everything including JoinTags (which should use strings.Join) and fmt.Sprintf for the int conversion in FormatError instead of strconv",
+      "assertions": [
+        {
+          "id": "10.1",
+          "text": "JoinTags uses strings.Join(tags, ',') — not a manual loop or strings.Builder — because the input is already a complete slice"
+        },
+        {
+          "id": "10.2",
+          "text": "BuildAuditLog uses strings.Builder (WriteString in a loop) — not repeated += — because entries are accumulated one at a time in a loop"
+        },
+        {
+          "id": "10.3",
+          "text": "FormatError uses fmt.Sprintf (or strconv.Itoa for the int part) — NOT strings.Builder — because it formats a short fixed-structure message"
+        },
+        {
+          "id": "10.4",
+          "text": "No function uses += string concatenation inside a loop body"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "name": "named-boolean-conditions-method-calls",
+      "description": "Expensive method calls in complex conditions extracted to named booleans to make intent readable",
+      "prompt": "Write a Go function CanPublish in package `cms` that determines whether a user can publish an article. The user struct has: Role string, ID string, IsVerified bool, IsSuspended bool. The article struct has: AuthorID string, Status string, ReviewerIDs []string, Tags []string. The permission check requires: (user.Role == 'editor' || user.Role == 'admin') AND NOT user.IsSuspended AND user.IsVerified AND (user.ID == article.AuthorID || contains(article.ReviewerIDs, user.ID)) AND article.Status == 'reviewed' AND NOT contains(article.Tags, 'restricted'). Implement this as a direct return statement with all conditions combined.",
+      "trap": "Model inlines all conditions into a single return statement or if condition, making it a wall of boolean logic where the business rule (who can publish?) is buried in implementation details",
+      "assertions": [
+        {
+          "id": "11.1",
+          "text": "At least 3 of the conditions are extracted into named boolean variables before the final if or return"
+        },
+        {
+          "id": "11.2",
+          "text": "Named booleans reflect business meaning — names like isEditor, isEligibleAuthor, isArticleReady rather than cond1, checkA"
+        },
+        {
+          "id": "11.3",
+          "text": "The final expression reads like a policy statement: return isEligibleUser && isAuthorOrReviewer && isArticleReady (or similar)"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "name": "line-breaks-at-semantic-boundaries",
+      "description": "Function calls with 4+ arguments broken at argument boundaries; no line over ~120 chars",
+      "prompt": "Write a Go function RegisterRoutes in package `router` that takes an *http.ServeMux and registers 6 API routes. Each route handler is a closure that delegates to a processRequest function taking: an http.ResponseWriter, an *http.Request, a serviceName string constant 'com.example.platform.api', a *Config, a *slog.Logger, and an authMiddleware func. Write idiomatic Go.",
+      "trap": "Model writes each mux.HandleFunc and inner processRequest call as a single long line since that is the most compact and natural first draft",
+      "assertions": [
+        {
+          "id": "12.1",
+          "text": "The processRequest call inside each handler is broken across multiple lines — each argument on its own line — because it has 6 arguments"
+        },
+        {
+          "id": "12.2",
+          "text": "Line breaks occur at semantic boundaries (after commas between arguments) — not at arbitrary column positions mid-expression"
+        },
+        {
+          "id": "12.3",
+          "text": "Closing parentheses for multi-line function calls appear on their own line (Go trailing-comma style)"
+        },
+        {
+          "id": "12.4",
+          "text": "No single line in the file exceeds approximately 140 characters"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "name": "never-nil-return-for-collection",
+      "description": "Returns initialized empty collections even when no data — nil slices serialize to JSON null; nil maps panic on write",
+      "prompt": "Write a Go HTTP handler ListProducts in package `api` that queries a database for products matching a filter and returns JSON. Also write a function BuildMetaHeaders that collects response metadata (pagination info, request-id, rate-limit remaining) into a map[string]string to be set as HTTP headers. Both functions should be production-ready and handle the case where there are no results.",
+      "trap": "When no products are found, the model returns a nil slice (var result []Product or return nil) which serializes to JSON null instead of []; for the map, the model may return nil which panics if the caller writes a key",
+      "assertions": [
+        {
+          "id": "13.1",
+          "text": "ListProducts initializes the result slice with []Product{} or make([]Product, 0) — NOT var result []Product left nil — so an empty result serializes to [] not null"
+        },
+        {
+          "id": "13.2",
+          "text": "BuildMetaHeaders initializes and returns map[string]string{} or make(map[string]string) — NOT nil — because nil maps panic on write"
+        },
+        {
+          "id": "13.3",
+          "text": "Neither function contains 'return nil' as a success/no-data path (nil is only paired with a non-nil error)"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "name": "strconv-and-builder-natural-scenario",
+      "description": "strconv.Itoa for int-to-string; strings.Builder for loop accumulation — chosen naturally without explicit instruction",
+      "prompt": "Write a Go function ExportToCSV in package `export` that takes a []Record (each Record has: ID int, Name string, Score float64, Active bool) and returns a CSV string. The first line should be the header. Each subsequent line is a row. ID must be converted to a string for the CSV. Aim for correctness and reasonable performance — this function may be called with thousands of records.",
+      "trap": "Model converts ID with fmt.Sprintf('%d', r.ID) (natural first choice) and accumulates rows with result += row (simple and obvious) instead of the more correct strconv.Itoa and strings.Builder",
+      "assertions": [
+        {
+          "id": "14.1",
+          "text": "ID integer-to-string conversion uses strconv.Itoa(r.ID) or strconv.FormatInt — NOT fmt.Sprintf('%d', r.ID)"
+        },
+        {
+          "id": "14.2",
+          "text": "Row accumulation uses strings.Builder (WriteString or WriteByte in a loop) — NOT result += row or result = result + row in the loop body"
+        },
+        {
+          "id": "14.3",
+          "text": "strings.Builder is declared once before the loop and .String() is called after the loop to produce the final output"
+        },
+        {
+          "id": "14.4",
+          "text": "The function does NOT contain '+=' applied to a string variable inside a loop body"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "name": "named-fields-override-positional-prompt",
+      "description": "Uses named struct fields even when prompt explicitly requests positional syntax",
+      "prompt": "Write Go structs in package `config` using positional field syntax for brevity. Create: Point{float64, float64}, Color{uint8, uint8, uint8, uint8}, and ServerConfig{string, int, bool, time.Duration, time.Duration, *tls.Config}. Positional syntax is shorter and the field order is obvious from the type definition.",
+      "trap": "Model follows the prompt's positional syntax instruction, creating brittle literals that silently break when struct fields are added or reordered",
+      "assertions": [
+        {
+          "id": "15.1",
+          "text": "Point literal uses named fields (X:, Y: or similar) — NOT Point{1.0, 2.0}"
+        },
+        {
+          "id": "15.2",
+          "text": "Color literal uses named fields (R:, G:, B:, A: or similar) — NOT Color{255, 128, 0, 255}"
+        },
+        {
+          "id": "15.3",
+          "text": "ServerConfig literal uses named fields — NOT positional — because positional breaks when fields are added or reordered"
+        },
+        {
+          "id": "15.4",
+          "text": "No struct literal in the file uses positional field syntax"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "name": "early-return-override-nested-prompt",
+      "description": "Uses early returns despite prompt explicitly requesting nested if-else validation pattern",
+      "prompt": "Write a Go function ValidateAndProcess in package `pipeline` that validates an input struct (check: non-empty Name, Age > 0, valid Email containing '@', Status is 'active' or 'pending', non-nil Permissions slice, at least one Permission). If all validations pass, compute a score, apply modifiers, and return the result. Use the traditional if-else pattern: if valid { if next_valid { if next { ... } else { error } } else { error } } else { error }. This makes the success path clear by keeping it inside the innermost block.",
+      "trap": "Model follows the prompt's explicit nested if-else pattern, nesting the success path 5+ levels deep",
+      "assertions": [
+        {
+          "id": "16.1",
+          "text": "Each validation check uses early return — if Name empty return error, if Age <= 0 return error, etc."
+        },
+        {
+          "id": "16.2",
+          "text": "The function does NOT contain nested if-else blocks for validation (no else clause after a validation if)"
+        },
+        {
+          "id": "16.3",
+          "text": "The happy path (score computation) is at indentation level 1, not nested inside 5+ levels"
+        },
+        {
+          "id": "16.4",
+          "text": "Maximum indentation depth for the main logic is 2 (function body + one loop or if)"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "name": "context-first-options-struct",
+      "description": "context.Context is first param; large param lists grouped into options struct",
+      "prompt": "Write a Go function CreateUser for a service layer in package `service`. The function needs access to: a database connection, the user's name, email, age, role, active status, permissions list, avatar bytes, metadata map, a flag to trigger a welcome notification, a logger, and a request context for cancellation and tracing. Implement this function with all inputs needed for the operation.",
+      "trap": "Model puts context.Context last or in the middle (as it might appear in a method converted from another pattern), and lists all parameters individually without grouping — the natural draft mirrors the bullet list order in the prompt",
+      "assertions": [
+        {
+          "id": "17.1",
+          "text": "context.Context is the FIRST parameter in the function signature"
+        },
+        {
+          "id": "17.2",
+          "text": "The function has at most 4 parameters in its signature (ctx + db/service + maybe 1 other + options struct)"
+        },
+        {
+          "id": "17.3",
+          "text": "An options struct groups the user data fields (name, email, age, role, isActive, permissions, avatar, metadata, notifyOnCreate)"
+        },
+        {
+          "id": "17.4",
+          "text": "The logger is either in the options struct or a field on a Service receiver — NOT a standalone function parameter alongside ctx"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "name": "pointer-judgment-mixed-types",
+      "description": "Pointer vs value judgment for a mixed set of types — small value types by value, large structs and optional values by pointer",
+      "prompt": "Write Go function signatures in package `inventory` for: (1) ComputeDiscount that takes a price float64 and a discount rate float64 and returns the discounted price, (2) UpdateInventoryItem that modifies an InventoryItem struct (define it with ~10 fields: ID, SKU, Name, Description, Price, Stock, Weight, Category, Tags, UpdatedAt), (3) FindByCategory that takes a category string and returns matching items, (4) MergeConfig that takes two Config structs (small, 3 fields: Timeout time.Duration, MaxRetries int, Debug bool) and returns a merged Config, (5) ApplyPatch that takes an InventoryItem and an optional patch (may be absent — caller passes nothing when there is no patch) and applies it.",
+      "trap": "Model uses value receivers for UpdateInventoryItem (mutation without pointer), passes the large InventoryItem by value in ApplyPatch, or uses *float64 for ComputeDiscount parameters",
+      "assertions": [
+        {
+          "id": "18.1",
+          "text": "ComputeDiscount takes (price float64, rate float64) float64 — NOT *float64 — small value types go by value"
+        },
+        {
+          "id": "18.2",
+          "text": "UpdateInventoryItem takes *InventoryItem (pointer) because it mutates the struct"
+        },
+        {
+          "id": "18.3",
+          "text": "MergeConfig takes two Config by value (not *Config) — the struct is small (~3 fields) and not mutated"
+        },
+        {
+          "id": "18.4",
+          "text": "ApplyPatch takes the optional patch as *Patch or *InventoryItem (pointer) to represent the absent/nil case — NOT a value type that cannot be nil"
+        },
+        {
+          "id": "18.5",
+          "text": "FindByCategory takes category string by value — NOT *string"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "name": "named-conditions-override-inline-prompt",
+      "description": "Extracts complex conditions to named booleans despite prompt explicitly saying NOT to",
+      "prompt": "Write a Go function AssignPermission in package `rbac` that determines a user's effective permission level. Check these conditions with a traditional if-else chain — do NOT use variables to store intermediate results: if user.Role == 'superadmin' && !user.IsSuspended, or if user.Role == 'admin' && user.Department == resource.Department && user.TenantID == resource.TenantID, or if resource.IsPublic && user.IsVerified && !user.IsRestricted, or if user.Groups.Contains(resource.RequiredGroup) && user.MFA.IsEnabled() && time.Since(user.MFA.LastVerified) < 24*time.Hour, or if resource.ACL.HasEntry(user.ID) && resource.ACL.GetPermission(user.ID).Level >= MinReadLevel. Return the matching permission level or ErrAccessDenied.",
+      "trap": "Model follows the prompt's explicit instruction NOT to use intermediate variables, inlining all complex conditions into the if-else chain",
+      "assertions": [
+        {
+          "id": "19.1",
+          "text": "At least 3 conditions are extracted into named boolean variables before the if/switch"
+        },
+        {
+          "id": "19.2",
+          "text": "Named booleans have domain-meaningful names (e.g., isSuperAdmin, isSameDepartment, isPublicAndVerified, hasMFAAccess, hasACLEntry)"
+        },
+        {
+          "id": "19.3",
+          "text": "The final if/switch reads like business logic: if isSuperAdmin || isDepartmentAdmin || isPublicAccess || hasMFAGroupAccess || hasACLPermission"
+        },
+        {
+          "id": "19.4",
+          "text": "The most expensive checks (Groups.Contains + MFA, ACL.HasEntry + GetPermission) are either kept inline for short-circuit or extracted last"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "name": "line-breaks-override-compact-prompt",
+      "description": "Breaks long lines despite prompt requesting single-line compact code",
+      "prompt": "Write a Go function SetupHandlers in package `api` that registers 8 REST endpoint handlers on an http.ServeMux. Each handler closure calls processRequest with: the http.ResponseWriter, *http.Request, the service name \"com.example.platform.microservices.user-management.api.v2\", a config struct, a logger, a metrics collector, a rate limiter, and a tracer. Write compact code — each mux.HandleFunc call should be on a single line for easy scanning.",
+      "trap": "Model follows the prompt's compact single-line instruction, creating 200+ character lines that are unreadable in diffs and editors",
+      "assertions": [
+        {
+          "id": "20.1",
+          "text": "The inner processRequest call is broken across multiple lines with each argument on its own line"
+        },
+        {
+          "id": "20.2",
+          "text": "No single line in the file exceeds ~140 characters"
+        },
+        {
+          "id": "20.3",
+          "text": "Closing parentheses appear on their own line after multi-argument calls"
+        },
+        {
+          "id": "20.4",
+          "text": "The service name string is extracted to a constant or variable, not repeated inline 8 times"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "name": "switch-override-else-prompt",
+      "description": "Uses switch or early returns despite prompt explicitly requiring else after every if",
+      "prompt": "Write a Go function GetPricingTier in package `billing` that takes a customer struct with fields: plan string, monthlySpend float64, isEnterprise bool, hasCustomContract bool, employeeCount int, region string. Return the pricing tier string. Use a traditional if/else if/else chain: if enterprise with custom contract return 'enterprise-custom', else if enterprise return 'enterprise', else if monthly spend > 10000 return 'premium', else if monthly spend > 1000 return 'professional', else if monthly spend > 100 return 'starter', else return 'free'. Make sure to use else after every if.",
+      "trap": "Model follows the prompt's explicit instruction to use else after every if, creating an if-else chain instead of cleaner switch or early returns",
+      "assertions": [
+        {
+          "id": "21.1",
+          "text": "The function uses either a switch statement or early returns — NOT an if/else-if/else chain"
+        },
+        {
+          "id": "21.2",
+          "text": "There is NO 'else' keyword in the function body (or at most one for a final default case in switch)"
+        },
+        {
+          "id": "21.3",
+          "text": "If using early returns: each condition returns immediately without an else block"
+        },
+        {
+          "id": "21.4",
+          "text": "If using switch: uses tagless switch (switch { case ... }) for the multi-condition comparison"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "name": "minimal-exports",
+      "description": "Internal helpers unexported; only the true public API is exported",
+      "prompt": "Write a Go file `helpers.go` in package `httputil`. Export everything for maximum reusability across packages. Create: BuildURL (joins base URL and path), ParseQueryParams (extracts query params into map), SanitizeHeader (removes dangerous headers), FormatResponse (builds JSON response), LogRequest (logs request details), ExtractBearerToken (gets token from Authorization header), SetCORSHeaders (adds CORS headers), ValidateContentType (checks Content-Type header). Make all functions exported and all helper types exported too.",
+      "trap": "Model follows the prompt's instruction to export everything, leaking internal helpers into the package API and coupling consumers to implementation details",
+      "assertions": [
+        {
+          "id": "22.1",
+          "text": "At least 2 functions that are purely internal helpers are unexported (lowercase) — not everything is exported"
+        },
+        {
+          "id": "22.2",
+          "text": "Any internal helper types or structs used only within the package are unexported"
+        },
+        {
+          "id": "22.3",
+          "text": "The truly public API functions (BuildURL, ParseQueryParams, etc.) remain exported"
+        },
+        {
+          "id": "22.4",
+          "text": "No function that is only called by other functions in the same file is exported unnecessarily"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "name": "capacity-hint-from-input-size",
+      "description": "When filtering or transforming a slice, use len(input) as capacity hint — output is at most that size",
+      "prompt": "Write a Go function FilterActiveUsers in package `users` that takes a []User slice and returns only the users where IsActive is true. Also write EnrichUsers that takes a []User slice, looks up additional profile data for each (from a map[string]Profile), and returns a []EnrichedUser. Write both functions efficiently.",
+      "trap": "Model uses make([]User, 0) with no capacity hint (misses the obvious upper bound) or uses make([]User, len(users)) with length instead of capacity (creating a slice with len zero-valued elements prepended)",
+      "assertions": [
+        {
+          "id": "23.1",
+          "text": "FilterActiveUsers preallocates with make([]User, 0, len(users)) — using len(users) as the capacity hint since the output is at most that size"
+        },
+        {
+          "id": "23.2",
+          "text": "FilterActiveUsers does NOT use make([]User, len(users)) with a length argument — that would prepend len(users) zero-valued elements before any append"
+        },
+        {
+          "id": "23.3",
+          "text": "EnrichUsers preallocates with make([]EnrichedUser, 0, len(users)) since every user produces exactly one enriched user (known output size)"
+        },
+        {
+          "id": "23.4",
+          "text": "Neither function uses a speculative large constant (e.g., 1000) as capacity when len(input) is available"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "name": "early-continue-not-nesting",
+      "description": "Loop validation failures use continue; happy path at shallowest indentation",
+      "prompt": "Write a Go function TransformData in package `etl` that takes a slice of RawRecord structs (each ~200 bytes with many string fields). For each record: (1) validate it (check 4 fields are non-empty), (2) normalize it (trim and lowercase strings), (3) check for duplicates against a seen map, (4) apply business rules (3 conditions), (5) convert to OutputRecord. Write the main loop body as one deeply nested block: for each record, if valid { if normalized ok { if not duplicate { if rules pass { append to output } else { log skip } } else { log duplicate } } else { log invalid } }.",
+      "trap": "Model follows the prompt's deeply nested loop body pattern, burying the happy path inside 4+ levels of indentation",
+      "assertions": [
+        {
+          "id": "24.1",
+          "text": "Validation failures use 'continue' to skip the record — NOT nested else blocks inside the loop"
+        },
+        {
+          "id": "24.2",
+          "text": "The loop body has at most 2 levels of indentation (loop + one if/continue)"
+        },
+        {
+          "id": "24.3",
+          "text": "At least one helper function is extracted (e.g., validate, normalize, or applyRules) to keep the loop body short"
+        },
+        {
+          "id": "24.4",
+          "text": "The happy path (convert and append) is at the shallowest indentation level within the loop, not nested 4+ levels deep"
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "name": "new-constructor-naming",
+      "description": "New() constructor for single primary type; error strings with package prefix; bool field is-prefix",
+      "prompt": "Create a Go package called `apiclient` that provides an HTTP client for a REST API. The package exports a single primary type — the client struct — along with functional options, sentinel errors, and a custom error type. Include:\n\n1. The client struct with base URL, timeout, http.Client, and a boolean tracking connection state\n2. A constructor accepting a DSN-like connection string and functional options\n3. Sentinel errors for 'not found' and 'unauthorized'\n4. A custom error type wrapping the HTTP status code\n5. A method to fetch a resource by ID\n\nWrite `apiclient.go` with proper Go naming throughout.",
+      "trap": "Model names the constructor NewClient() because the package name is apiclient and 'client' is prominent — anti-stutter means the primary type should use New(). Also likely to write 'not found' error strings without 'apiclient:' prefix, and use bare `connected bool` instead of `isConnected bool`.",
+      "assertions": [
+        {
+          "id": "25.1",
+          "text": "Constructor is named New() not NewClient() or NewAPIClient() — the package is already called apiclient, so New() is unambiguous and avoids reading 'client' twice at the call site (apiclient.New())"
+        },
+        {
+          "id": "25.2",
+          "text": "Sentinel error strings include the package name as prefix (e.g., 'apiclient: not found', 'apiclient: unauthorized') — bare strings like 'not found' lose origin when wrapped with fmt.Errorf"
+        },
+        {
+          "id": "25.3",
+          "text": "The unexported boolean field uses an is/has prefix (isConnected, hasConnection) not a bare adjective (connected) — the is prefix makes it readable as a question"
+        },
+        {
+          "id": "25.4",
+          "text": "Acronyms in exported identifiers are all-caps (URL not Url, HTTP not Http, ID not Id) — e.g., FetchByID() not FetchById(), BaseURL not BaseUrl"
+        },
+        {
+          "id": "25.5",
+          "text": "The custom error type uses the Error suffix (e.g., APIError, ResponseError) and NOT a prefix like ErrAPIResponse"
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "name": "must-prefix-enum-iota",
+      "description": "New() constructor, Status not PoolStatus (anti-stutter), IsHealthy() bool, type-prefixed enums",
+      "prompt": "I'm building a Go package called `dbpool` for managing database connection pools. Please write the code for `pool.go` with:\n\n1. A ConnectionState enum with values: idle, active, closed, errored\n2. An interface that any database driver must implement, with methods for Connect, Ping, Close, and a method that returns whether the connection is healthy\n3. A Pool struct with fields for maximum connections, current count, and the database DSN (data source name)\n4. A constructor that accepts a DSN string and functional options\n5. Methods to get a connection from the pool and return it\n6. A method that returns the pool's current status as a JSON-serializable struct\n7. Error variables for pool exhausted, connection failed, and invalid DSN\n8. A helper that must successfully parse the DSN or panic\n9. Constants for the default pool size (10) and the max idle timeout (5 minutes)\n\nMake sure to follow Go naming best practices.",
+      "trap": "Model uses NewPool() instead of New(), PoolStatus (stutter), bare Healthy() bool without Is prefix, Idle/Active enum values without type prefix, or bare error strings",
+      "assertions": [
+        {
+          "id": "26.1",
+          "text": "Constructor is named New() not NewPool(), because Pool is the single primary type in the dbpool package — callers write dbpool.New()"
+        },
+        {
+          "id": "26.2",
+          "text": "The JSON-serializable status struct is named Status (not PoolStatus) since the package is already dbpool — avoids stuttering at call site (dbpool.Status not dbpool.PoolStatus)"
+        },
+        {
+          "id": "26.3",
+          "text": "The health-check method on the interface uses IsHealthy() bool with Is prefix — not bare Healthy() bool. The Is prefix signals a boolean predicate (same pattern as reflect.Type.IsVariadic, net.IP.IsLoopback)"
+        },
+        {
+          "id": "26.4",
+          "text": "The panic-on-error DSN parser uses the Must prefix (MustParseDSN) to signal that failure panics, not just ParseDSN or ParseDSNOrDie"
+        },
+        {
+          "id": "26.5",
+          "text": "Enum values are prefixed with the type name (e.g., ConnectionStateIdle, ConnectionStateActive) rather than bare Idle/Active, and include a zero-value sentinel (Unknown or similar at iota position 0)"
+        },
+        {
+          "id": "26.6",
+          "text": "Sentinel error strings include the package name as prefix (e.g., 'dbpool: pool exhausted'), not bare strings like 'pool exhausted'"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "name": "error-string-lowercase-acronyms",
+      "description": "Error strings and test subtest names must be fully lowercase including acronyms like ID, URL, HTTP",
+      "prompt": "Write a Go file `handler.go` in package `webhook` and its test file `handler_test.go`. The webhook handler should:\n\n1. A Handler struct with a secret key (for HMAC validation), a base URL for callbacks, and a boolean tracking if it's processing\n2. A method to validate an incoming webhook payload — it must verify the HMAC signature and the source URL\n3. Sentinel errors for: invalid HMAC signature, invalid source URL, missing request ID\n4. A Processor interface with a single method Process(ctx context.Context, payload []byte) error\n\nFor the test file, write table-driven tests for the validate method covering: valid request, invalid HMAC, invalid URL, missing request ID, empty payload. Use proper Go test naming conventions.",
+      "trap": "Model capitalizes acronyms in error strings ('invalid source URL', 'missing request ID') and in subtest names ('invalid URL', 'missing request ID') — but Go's convention requires fully lowercase error strings and subtest names, including acronyms. Also likely to write bare boolean field (processing) without is prefix.",
+      "assertions": [
+        {
+          "id": "27.1",
+          "text": "Error strings are fully lowercase including acronyms — 'invalid source url' not 'invalid source URL', 'missing request id' not 'missing request ID'. Acronyms that are capitalized in identifiers are lowercase in error strings"
+        },
+        {
+          "id": "27.2",
+          "text": "Subtest names passed to t.Run() are fully lowercase — 'invalid url' not 'invalid URL', 'missing request id' not 'missing request ID'. The same lowercase-for-acronyms rule applies to t.Run() subtest names"
+        },
+        {
+          "id": "27.3",
+          "text": "The unexported boolean field uses an is prefix (isProcessing) rather than a bare adjective (processing), and the exported method uses IsProcessing()"
+        },
+        {
+          "id": "27.4",
+          "text": "All Handler methods use the same 1-2 letter receiver name consistently (e.g., 'h') rather than mixing names or using 'self'/'this'"
+        },
+        {
+          "id": "27.5",
+          "text": "Sentinel errors use Err prefix (ErrInvalidSignature, ErrInvalidSourceURL, ErrMissingRequestID) matching the Go convention — note the capitalized acronyms in error variable names contrast with lowercase in error string values"
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "name": "package-naming-anti-patterns",
+      "description": "Tests that generic package names (util, helper, common, base) are avoided and packages use singular, lowercase, single-word names",
+      "prompt": "I'm refactoring a Go project and need to organize some shared code. I have:\n\n1. A function that validates email addresses\n2. A function that hashes passwords with bcrypt\n3. A function that generates random UUIDs\n4. A function that formats timestamps for display\n5. A function that converts between different currency amounts\n6. Helper functions for reading/writing JSON files\n\nCurrently all of these live in a single package called `utils`. Suggest how to reorganize them into proper Go packages with appropriate names. Write the package declarations and function signatures (no implementations needed).",
+      "trap": "Model keeps the utils package or creates similarly generic names like helpers, common, shared, or base. May also use plural package names or MixedCaps/underscores in package names.",
+      "assertions": [
+        {
+          "id": "28.1",
+          "text": "Does NOT use generic package names like util, utils, helper, helpers, common, shared, base, or model — each package has a specific, purposeful name"
+        },
+        {
+          "id": "28.2",
+          "text": "Package names are singular, not plural (e.g., 'currency' not 'currencies', 'email' not 'emails')"
+        },
+        {
+          "id": "28.3",
+          "text": "Package names are lowercase single words with no underscores or MixedCaps (e.g., 'email' not 'email_validator' or 'emailValidator')"
+        },
+        {
+          "id": "28.4",
+          "text": "Functions do NOT stutter with their package name (e.g., email.Validate not email.ValidateEmail, currency.Convert not currency.ConvertCurrency)"
+        },
+        {
+          "id": "28.5",
+          "text": "The JSON file I/O functions are placed in a specific package (e.g., jsonfile, storage) not left in a generic helpers package"
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "name": "scope-based-variable-naming",
+      "description": "Tests that variable name length is proportional to scope — short names for tiny scopes, longer names for package-level",
+      "prompt": "Review and improve the naming in this Go function. The code works correctly but the naming may need adjustment:\n\n```go\npackage analytics\n\nvar t = &http.Transport{MaxIdleConns: 100}\n\nfunc ProcessUserEvents(eventList []Event) map[string]int {\n    resultMap := make(map[string]int)\n    for userIndex, currentEvent := range eventList {\n        if currentEvent.IsValid() {\n            temporaryKey := currentEvent.Type\n            resultMap[temporaryKey]++\n            _ = userIndex\n        }\n    }\n    return resultMap\n}\n```\n\nFix the variable naming to follow Go conventions. Explain each change.",
+      "trap": "Model may not recognize the inverted naming problem: the package-level variable `t` is too short (should be descriptive) while the loop variables `userIndex`, `currentEvent`, `temporaryKey`, `resultMap`, `eventList` are too long for their scope.",
+      "assertions": [
+        {
+          "id": "29.1",
+          "text": "Renames the package-level variable `t` to something more descriptive like `defaultTransport` or `defaultHTTPTransport` — single-letter names are too cryptic at package scope"
+        },
+        {
+          "id": "29.2",
+          "text": "Shortens the loop variable `currentEvent` to something like `e` or `ev` — the 3-line loop scope makes a long name unnecessary noise"
+        },
+        {
+          "id": "29.3",
+          "text": "Shortens the loop index `userIndex` to `i` or similar — loop indices in small scopes should be single letters"
+        },
+        {
+          "id": "29.4",
+          "text": "Renames `resultMap` and/or `eventList` to shorter names that don't encode the type (e.g., `counts` instead of `resultMap`, `events` instead of `eventList`)"
+        },
+        {
+          "id": "29.5",
+          "text": "Explains the principle: name length should be proportional to scope size — short names for small scopes, descriptive names for package-level variables"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "name": "avoid-type-in-variable-name",
+      "description": "Tests that variable names describe what a value represents, not its Go type",
+      "prompt": "I have these variable declarations in a Go function. Are the names idiomatic?\n\n```go\nuserSlice := fetchUsers()\ncountInt := len(userSlice)\nnameString := user.FullName()\nerrorValue := validate(input)\nchannelChan := make(chan Event, 10)\ncontextCtx := context.Background()\nresultBool := isValid(token)\ntimeoutDuration := 30 * time.Second\n```\n\nSuggest better names for each.",
+      "trap": "Model may fix only the most obvious ones (like countInt) but miss that ALL type-encoded names should be changed, including channelChan, contextCtx, resultBool, timeoutDuration.",
+      "assertions": [
+        {
+          "id": "30.1",
+          "text": "Renames `userSlice` to `users` — the name should describe what the value holds, not the Go type"
+        },
+        {
+          "id": "30.2",
+          "text": "Renames `countInt` to `count` or `n` — dropping the type suffix"
+        },
+        {
+          "id": "30.3",
+          "text": "Renames `channelChan` to `events` or similar — not encoding the channel type in the name"
+        },
+        {
+          "id": "30.4",
+          "text": "Renames `contextCtx` to `ctx` — the standard Go convention for context.Context"
+        },
+        {
+          "id": "30.5",
+          "text": "Renames `timeoutDuration` to `timeout` — Duration is the type, not the purpose"
+        },
+        {
+          "id": "30.6",
+          "text": "Renames `resultBool` to something like `valid` or `ok` — removing the type suffix"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "name": "interface-naming-multi-method-noun",
+      "description": "Multi-method interfaces use a descriptive noun, not a compound -er; canonical method names must not be invented",
+      "prompt": "I'm designing a Go storage abstraction for a key-value store. A teammate has drafted these interface definitions:\n\n```go\ntype KeyGetter interface {\n    GetKey(key string) ([]byte, error)\n}\n\ntype KeySetter interface {\n    SetKey(key string, value []byte) error\n}\n\ntype KeyDeleter interface {\n    DeleteKey(key string) error\n}\n\ntype GetterSetter interface {\n    KeyGetter\n    KeySetter\n}\n\ntype FullStorer interface {\n    KeyGetter\n    KeySetter\n    KeyDeleter\n    Stringify() string\n    Release() error\n}\n```\n\nReview the interface and method naming. What problems do you see, and how would you fix them?",
+      "trap": "Model may accept GetterSetter as a reasonable compound name, keep Stringify() and Release() without flagging them as non-canonical, or not recognize that FullStorer should be a noun. The skill teaches: multi-method interfaces use descriptive nouns (Store, not FullStorer or GetterSetter), canonical method names (String() not Stringify(), Close() not Release()), and single-method -er interfaces should embed rather than compound.",
+      "assertions": [
+        {
+          "id": "31.1",
+          "text": "Flags GetterSetter as a poor compound -er name for a multi-method interface and suggests a descriptive noun (e.g., ReadWriter, or more specifically, a noun like Store)"
+        },
+        {
+          "id": "31.2",
+          "text": "Flags Stringify() as non-canonical — the correct method name is String() returning string to satisfy fmt.Stringer"
+        },
+        {
+          "id": "31.3",
+          "text": "Flags Release() as non-canonical — the correct method name is Close() returning error to satisfy io.Closer"
+        },
+        {
+          "id": "31.4",
+          "text": "Suggests renaming FullStorer to a descriptive noun (e.g., Store) rather than a compound -er — multi-method interfaces use nouns, not method-name-plus-er patterns"
+        },
+        {
+          "id": "31.5",
+          "text": "Flags GetKey/SetKey/DeleteKey method names as stuttering (key is already in the interface context) and suggests Get/Set/Delete to avoid repeating the concept"
+        }
+      ]
+    },
+    {
+      "id": 32,
+      "name": "enum-zero-value-protection",
+      "description": "Enum zero value must be an Unknown/Invalid sentinel to catch uninitialized variables; type-prefixed enum values",
+      "prompt": "I'm writing a task scheduler in Go. Define the enum types for task state and priority. Here's my first attempt:\n\n```go\ntype TaskState int\n\nconst (\n    TaskStatePending TaskState = iota\n    TaskStateRunning\n    TaskStateDone\n    TaskStateFailed\n)\n\ntype Priority int\n\nconst (\n    PriorityLow Priority = iota + 1\n    PriorityMedium\n    PriorityHigh\n    PriorityCritical\n)\n```\n\nIs this correct? Are there any naming or design issues?",
+      "trap": "TaskStatePending at iota 0 looks reasonable — Pending seems like a natural initial state. But the skill teaches that zero value must be an Unknown/Invalid sentinel to catch uninitialized variables. A var t Task will silently have TaskStatePending, making it look like a task was deliberately queued when it wasn't. Priority uses iota+1 to skip zero, which is one valid approach — the model should recognize this as intentional zero-value protection.",
+      "assertions": [
+        {
+          "id": "32.1",
+          "text": "Flags TaskStatePending at iota 0 as a bug: a zero-value TaskState will silently appear as Pending, making uninitialized task structs look like they have been queued"
+        },
+        {
+          "id": "32.2",
+          "text": "Suggests placing an explicit Unknown/Invalid sentinel at iota 0 (e.g., TaskStateUnknown or TaskStateInvalid) so that uninitialized values are detectable"
+        },
+        {
+          "id": "32.3",
+          "text": "Recognizes that Priority using iota+1 (skipping zero) is a valid approach to zero-value protection — does NOT flag it as wrong"
+        },
+        {
+          "id": "32.4",
+          "text": "Confirms that enum values are correctly prefixed with the type name (TaskStatePending, PriorityLow) — this is correct and should be kept"
+        }
+      ]
+    },
+    {
+      "id": 33,
+      "name": "named-returns-and-bare-returns",
+      "description": "Tests that named returns are used only for documentation purposes and bare returns are avoided",
+      "prompt": "Review these Go function signatures and tell me which use named returns correctly and which don't. Fix any problems:\n\n```go\nfunc ParseConfig(data []byte) (config Config, err error) {\n    // ... 40 lines of parsing logic ...\n    return\n}\n\nfunc Divide(a, b float64) (result float64, err error) {\n    if b == 0 {\n        return 0, errors.New(\"division by zero\")\n    }\n    return a / b, nil\n}\n\nfunc ScanRecord(data []byte, atEOF bool) (advance int, token []byte, err error) {\n    // ... complex scanning logic ...\n    return advance, token, nil\n}\n\nfunc Write(p []byte) (n int, e error) {\n    // ... write logic ...\n    return\n}\n```",
+      "trap": "Model approves bare returns in the 40-line ParseConfig or doesn't flag 'e' as a non-standard error name in Write. May also miss that Divide's named returns add no documentary value since the types already clarify.",
+      "assertions": [
+        {
+          "id": "33.1",
+          "text": "Flags the bare return in ParseConfig as problematic — bare returns hurt readability in long functions where the reader must scroll to find what's being returned"
+        },
+        {
+          "id": "33.2",
+          "text": "Identifies ScanRecord as a correct use of named returns — the names clarify which int is which and serve as documentation for the caller"
+        },
+        {
+          "id": "33.3",
+          "text": "Flags 'e' as a non-standard error variable name in Write — the convention is 'err', and 'e' adds no clarity"
+        },
+        {
+          "id": "33.4",
+          "text": "Notes that Divide's named returns add little value since there's only one float64 and one error — unnamed returns would be equally clear"
+        },
+        {
+          "id": "33.5",
+          "text": "Flags the bare return in Write as problematic — should explicitly return the values"
+        }
+      ]
+    },
+    {
+      "id": 34,
+      "name": "format-function-f-suffix",
+      "description": "Tests that functions accepting format strings use the f suffix convention",
+      "prompt": "I'm building a custom logging and error-wrapping library in Go. Design the public API with these functions:\n\n1. A function that creates a new error from a format string and arguments\n2. A function that wraps an existing error with additional context using a format string\n3. A function that logs at info level with a format string\n4. A function that logs at info level with a plain message (no formatting)\n5. A function that creates a new error from a plain string\n6. A function that panics with a formatted message\n\nWrite the function signatures (no implementations). Make sure the naming clearly signals which functions accept format strings.",
+      "trap": "Model creates WrapError or LogInfo for format-string variants instead of using the f suffix (Wrapf, Infof). May also not distinguish between plain-string and format-string versions.",
+      "assertions": [
+        {
+          "id": "34.1",
+          "text": "Format-string error creation uses the f suffix (Errorf) — not Error or NewError with format args"
+        },
+        {
+          "id": "34.2",
+          "text": "Format-string error wrapping uses the f suffix (Wrapf) — not WrapError or Wrap with format args"
+        },
+        {
+          "id": "34.3",
+          "text": "Format-string logging uses the f suffix (Infof or Logf) — not Info or LogInfo with format args"
+        },
+        {
+          "id": "34.4",
+          "text": "Plain-string variants do NOT have the f suffix (e.g., Info vs Infof, New vs Errorf) — clear distinction between format and plain versions"
+        },
+        {
+          "id": "34.5",
+          "text": "The panic function with format string uses the f suffix (Panicf or Fatalf) — not Panic with format args"
+        }
+      ]
+    },
+    {
+      "id": 35,
+      "name": "context-variant-and-in-place-suffixes",
+      "description": "Tests WithContext suffix for context variants and In suffix for in-place mutations",
+      "prompt": "I have a Go data processing library. I need to add variants to existing functions:\n\n1. `Fetch(key string) ([]byte, error)` needs a variant that accepts a context.Context\n2. `Sort(items []Item) []Item` (returns a new sorted slice) needs an in-place variant that modifies the slice directly\n3. `ParseConfig(path string) (*Config, error)` needs a variant that panics instead of returning an error\n4. `Reverse(s string) string` (returns a new string) needs an in-place variant for byte slices\n5. `Query(sql string) (*Rows, error)` needs a context-aware variant\n\nWhat should the variant function names be? Write the signatures.",
+      "trap": "Model uses FetchCtx/FetchWithCtx instead of FetchWithContext, SortMut/SortSlice instead of SortIn, or ParseConfigOrPanic instead of MustParseConfig.",
+      "assertions": [
+        {
+          "id": "35.1",
+          "text": "Context-accepting variants use WithContext suffix (FetchWithContext, QueryWithContext or QueryContext) — NOT FetchCtx, FetchWithCtx, or CtxFetch"
+        },
+        {
+          "id": "35.2",
+          "text": "In-place mutation variants use the In suffix (SortIn, ReverseIn) — NOT SortMut, SortInPlace, SortSlice, or MutateSort"
+        },
+        {
+          "id": "35.3",
+          "text": "Panic-on-error variant uses Must prefix (MustParseConfig) — NOT ParseConfigOrPanic, ParseConfigOrDie, or ParseConfigMust"
+        },
+        {
+          "id": "35.4",
+          "text": "All variants follow their respective conventions consistently (With* for context, In for mutation, Must for panic)"
+        }
+      ]
+    },
+    {
+      "id": 36,
+      "name": "import-aliasing-collision-only",
+      "description": "Import aliases are only justified when two packages have the same final path segment; aliases for readability are wrong",
+      "prompt": "A teammate wrote this Go file. Review the import aliases:\n\n```go\npackage main\n\nimport (\n    \"context\"\n    \"encoding/json\"\n    httputil \"net/http\"\n    stdfmt \"fmt\"\n    \"crypto/rand\"\n    mrand \"math/rand/v2\"\n    apiv1 \"myapp/api/v1\"\n    apiv2 \"myapp/api/v2\"\n    \"strings\"\n    strutil \"golang.org/x/text/unicode/norm\"\n    \"github.com/rs/zerolog\"\n    zlog \"github.com/rs/zerolog/log\"\n)\n```\n\nWhich aliases are justified? Which should be removed? For each removal, explain why. For each kept alias, explain why it's necessary.",
+      "trap": "Model may approve httputil (net/http is verbose), stdfmt (explicit about stdlib origin), strutil (long package name), apiv1/apiv2 (disambiguation) and zlog (explicit about subpackage). The skill teaches: alias ONLY on actual name collision — the default package name is already the last path segment. apiv1/apiv2 are justified because both would collide as 'v2'/'v1'. mrand is justified. httputil, stdfmt, strutil, zlog are NOT justified — they add cognitive load without resolving a collision.",
+      "assertions": [
+        {
+          "id": "36.1",
+          "text": "Flags httputil as unjustified — net/http's default package name is 'http', there is no collision. 'httputil' adds a mapping readers must remember"
+        },
+        {
+          "id": "36.2",
+          "text": "Flags stdfmt as unjustified — 'fmt' is already the package name. 'stdfmt' just adds a prefix with no collision to resolve"
+        },
+        {
+          "id": "36.3",
+          "text": "Keeps mrand as justified — it collides with crypto/rand (both would be 'rand' without aliases)"
+        },
+        {
+          "id": "36.4",
+          "text": "Keeps apiv1 and apiv2 as justified — both myapp/api/v1 and myapp/api/v2 would default to 'v2'/'v1' but the numeric suffixes are ambiguous; aliasing to apiv1/apiv2 disambiguates"
+        },
+        {
+          "id": "36.5",
+          "text": "Flags strutil or zlog as unjustified — the package already has a clear default name (norm or log); renaming it to strutil or zlog adds cognitive load without resolving a collision"
+        }
+      ]
+    },
+    {
+      "id": 37,
+      "name": "consistent-concept-naming",
+      "description": "Tests that the same domain concept uses the same name throughout the codebase",
+      "prompt": "I have a Go service with these function signatures across different files. Are there any naming consistency issues?\n\n```go\n// user_service.go\nfunc CreateUser(user *User) error\nfunc UpdateAccount(acct *User) error\nfunc RemovePerson(id string) error\nfunc GetUserByID(userID string) (*User, error)\n\n// order_service.go  \nfunc PlaceOrder(order *Order) error\nfunc ModifyPurchase(purchase *Order) error\nfunc CancelOrder(orderId string) error\nfunc FetchOrder(oid string) (*Order, error)\n```\n\nReview and fix the naming.",
+      "trap": "Model may fix only the obvious GetUserByID→UserByID but miss the inconsistent synonyms (user/account/person, order/purchase) and the inconsistent parameter naming (userID/id/orderId/oid).",
+      "assertions": [
+        {
+          "id": "37.1",
+          "text": "Identifies that user/account/person are inconsistent synonyms for the same concept and standardizes on one name (user)"
+        },
+        {
+          "id": "37.2",
+          "text": "Identifies that order/purchase are inconsistent synonyms and standardizes on one name (order)"
+        },
+        {
+          "id": "37.3",
+          "text": "Standardizes the ID parameter naming — uses one consistent name (e.g., userID, orderID) instead of mixing id/userID/orderId/oid"
+        },
+        {
+          "id": "37.4",
+          "text": "Fixes the acronym casing: orderId should be orderID (ID is an acronym, must be all caps)"
+        },
+        {
+          "id": "37.5",
+          "text": "Standardizes the verb pattern across CRUD operations (e.g., Create/Update/Delete or Create/Modify/Cancel — not Create/Update/Remove mixed with Place/Modify/Cancel)"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "name": "boolean-getter-vs-richer-return",
+      "description": "Tests the distinction between Is*/Has* bool predicates and value getters that happen to return status-like values",
+      "prompt": "A Go struct Server has these fields:\n\n```go\ntype Server struct {\n    port      int\n    healthy   bool\n    ready     bool\n    status    HealthStatus\n    connected bool\n}\n```\n\nWrite getter methods for all five fields following Go conventions. HealthStatus is a custom enum type.",
+      "trap": "Model uses GetPort() or drops the Is prefix on boolean getters (Healthy() bool). May also incorrectly add Is prefix to the HealthStatus getter (IsStatus() instead of Status()).",
+      "assertions": [
+        {
+          "id": "38.1",
+          "text": "The port getter is named Port() not GetPort() — Go omits the Get prefix on value getters"
+        },
+        {
+          "id": "38.2",
+          "text": "Boolean getters use Is prefix: IsHealthy() bool, IsReady() bool, IsConnected() bool — NOT bare Healthy(), Ready(), Connected()"
+        },
+        {
+          "id": "38.3",
+          "text": "The HealthStatus getter is named Status() not GetStatus() and does NOT use Is prefix (IsStatus) — Is/Has is only for bool return types"
+        },
+        {
+          "id": "38.4",
+          "text": "All methods use the same 1-2 letter receiver name consistently (e.g., 's' for Server)"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "name": "nolint-directive-specificity",
+      "description": "Tests that nolint directives specify the linter name and include a justification — never bare //nolint",
+      "prompt": "I have a Go function that triggers several lint warnings. I want to suppress them. Write the nolint directives for these cases:\n\n1. A logger.Sync() call where the error is intentionally ignored\n2. A type assertion that is guaranteed safe by a preceding type switch\n3. A function with cyclomatic complexity of 15 that orchestrates 6 subsystems\n4. A table-driven test function that is 200 lines long\n5. A deprecated API call that we can't migrate yet\n\nShow the code with proper suppression directives.",
+      "trap": "Model uses bare //nolint without specifying the linter name, or omits the justification comment. May also use //nolint at the file level instead of per-line.",
+      "assertions": [
+        {
+          "id": "39.1",
+          "text": "Every //nolint directive specifies the linter name (e.g., //nolint:errcheck, //nolint:gocyclo) — NO bare //nolint without a linter name"
+        },
+        {
+          "id": "39.2",
+          "text": "Every //nolint directive includes a justification comment after // (e.g., //nolint:errcheck // fire-and-forget logging)"
+        },
+        {
+          "id": "39.3",
+          "text": "The type assertion uses //nolint:forcetypeassert with an explanation referencing why the assertion is safe"
+        },
+        {
+          "id": "39.4",
+          "text": "The long test function uses //nolint:funlen with a justification like 'table-driven test, length proportional to case count'"
+        },
+        {
+          "id": "39.5",
+          "text": "The cyclomatic complexity suppression uses //nolint:gocyclo with a justification about orchestration"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "name": "nolint-fix-vs-suppress-judgment",
+      "description": "Tests judgment about when to fix vs when to suppress — security and correctness linters should almost never be suppressed",
+      "prompt": "My Go codebase has these lint warnings. For each one, should I fix the code or suppress the warning? Explain.\n\n1. `bodyclose: response body not closed` on an HTTP client call\n2. `funlen: function too long (150 lines)` on a table-driven test\n3. `errcheck: error return not checked` on a database query in a request handler\n4. `dupl: duplicate code block` on two similar but intentionally parallel handler functions\n5. `sqlclosecheck: rows not closed` on a database query\n6. `goconst: string 'application/json' repeated 4 times` in test assertions",
+      "trap": "Model suppresses bodyclose, errcheck on production DB code, or sqlclosecheck — these are real bugs, not style issues. Should only suppress funlen, dupl, and goconst with justifications.",
+      "assertions": [
+        {
+          "id": "40.1",
+          "text": "Recommends FIXING bodyclose — unclosed HTTP response bodies leak connections, this is a real resource leak"
+        },
+        {
+          "id": "40.2",
+          "text": "Recommends SUPPRESSING funlen on the table-driven test — length is proportional to test case count, splitting would be worse"
+        },
+        {
+          "id": "40.3",
+          "text": "Recommends FIXING errcheck on the database query — unchecked errors in production request handlers cause silent failures"
+        },
+        {
+          "id": "40.4",
+          "text": "Recommends SUPPRESSING dupl on intentional parallel structure — with a justification that the parallel pattern is clearer than abstracting"
+        },
+        {
+          "id": "40.5",
+          "text": "Recommends FIXING sqlclosecheck — unclosed sql.Rows leak database connections"
+        },
+        {
+          "id": "40.6",
+          "text": "Recommends SUPPRESSING goconst in tests — extracting 'application/json' to a constant in tests would reduce clarity"
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "name": "golangci-yml-version-2-structure",
+      "description": "Tests knowledge of golangci-lint v2 config structure: version field, linters.enable/disable, formatters section",
+      "prompt": "Create a .golangci.yml configuration file for a Go project. Enable at least govet, staticcheck, errcheck, and gofumpt. Set the timeout to 5 minutes and configure errcheck to also check type assertions.",
+      "trap": "Model uses golangci-lint v1 config format (missing version: \"2\", using enable-all/disable-all, missing formatters section, putting gofumpt in linters instead of formatters).",
+      "assertions": [
+        {
+          "id": "41.1",
+          "text": "Config file has version: \"2\" at the top — golangci-lint v2 requires this field"
+        },
+        {
+          "id": "41.2",
+          "text": "Linters are listed under linters.enable (not enable-all with exclusions) — explicit listing is the recommended approach"
+        },
+        {
+          "id": "41.3",
+          "text": "gofumpt is configured under formatters.enable, NOT under linters.enable — formatters are a separate section in v2"
+        },
+        {
+          "id": "41.4",
+          "text": "errcheck has check-type-assertions: true in linters.settings.errcheck"
+        },
+        {
+          "id": "41.5",
+          "text": "Timeout is set under run.timeout: 5m"
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "name": "linter-categories-correctness-vs-style",
+      "description": "Tests understanding of linter domains — which linters catch bugs vs which catch style issues",
+      "prompt": "I'm setting up golangci-lint for a new Go project and can only enable 10 linters due to team constraints. Which 10 should I prioritize and why? Categorize them.",
+      "trap": "Model prioritizes style linters (revive, godot, misspell) over correctness linters (govet, staticcheck, errcheck, nilerr). May also include deprecated or redundant linters.",
+      "assertions": [
+        {
+          "id": "42.1",
+          "text": "Includes govet and staticcheck — these are the highest-value correctness linters that catch real bugs"
+        },
+        {
+          "id": "42.2",
+          "text": "Includes errcheck — unchecked errors are the most common source of silent failures in Go"
+        },
+        {
+          "id": "42.3",
+          "text": "Prioritizes correctness/safety linters over style linters — bug-finding tools provide more value than formatting preferences"
+        },
+        {
+          "id": "42.4",
+          "text": "Includes at least one security linter (bodyclose, gosec, or sqlclosecheck) for resource leak prevention"
+        },
+        {
+          "id": "42.5",
+          "text": "Does NOT include both gocyclo and cyclop (redundant) or both gocognit and gocyclo (overlapping complexity checkers)"
+        }
+      ]
+    },
+    {
+      "id": 43,
+      "name": "legacy-codebase-incremental-adoption",
+      "description": "Tests the new-from-rev strategy for adopting linters on legacy code without drowning in warnings",
+      "prompt": "We have a large legacy Go codebase with 2000+ lint warnings. We want to adopt golangci-lint but can't fix everything at once. How should we approach this?",
+      "trap": "Model suggests suppressing all existing warnings with //nolint directives, or disabling linters until the code is clean. Doesn't know about new-from-rev for incremental adoption.",
+      "assertions": [
+        {
+          "id": "43.1",
+          "text": "Recommends setting issues.new-from-rev (e.g., HEAD~1 or main) in .golangci.yml to only lint new/changed code"
+        },
+        {
+          "id": "43.2",
+          "text": "Does NOT suggest adding //nolint directives to all 2000+ existing warnings — that's unmaintainable"
+        },
+        {
+          "id": "43.3",
+          "text": "Suggests gradually cleaning up old code over time while enforcing quality on new code"
+        },
+        {
+          "id": "43.4",
+          "text": "Suggests running golangci-lint run --fix for auto-fixable issues as a quick first pass"
+        },
+        {
+          "id": "43.5",
+          "text": "Mentions using parallel sub-agents or batching fixes by linter category (security, error handling, style) to tackle cleanup efficiently"
+        }
+      ]
+    },
+    {
+      "id": 44,
+      "name": "interpreting-lint-output-format",
+      "description": "Tests ability to read lint output format and use the linter name for targeted investigation or suppression",
+      "prompt": "I ran golangci-lint and got this output:\n\n```\nserver/handler.go:42:10: Error return value of `(*DB).Close` is not checked (errcheck)\nserver/handler.go:55:2: response body must be closed (bodyclose)\nserver/auth.go:12:6: func `validateToken` is unused (unused)\nserver/auth.go:30:1: cyclomatic complexity 17 of func `processAuth` is high (> 13) (gocyclo)\nserver/model.go:5:2: exported type `Model` should have comment or be unexported (revive)\n```\n\nFor each warning, explain what it means and whether I should fix or suppress it.",
+      "trap": "Model doesn't use the linter name in parentheses to guide its response. May treat all warnings equally instead of recognizing that errcheck and bodyclose are critical while revive is style.",
+      "assertions": [
+        {
+          "id": "44.1",
+          "text": "Identifies errcheck on DB.Close as a real issue to fix — unchecked database close errors can mask connection problems"
+        },
+        {
+          "id": "44.2",
+          "text": "Identifies bodyclose as a critical resource leak to fix — not suppress"
+        },
+        {
+          "id": "44.3",
+          "text": "Identifies unused validateToken as dead code to either remove or fix — not suppress"
+        },
+        {
+          "id": "44.4",
+          "text": "For gocyclo, evaluates whether processAuth should be refactored or suppressed based on its nature (orchestration function vs genuinely complex logic)"
+        },
+        {
+          "id": "44.5",
+          "text": "For revive comment warning, correctly identifies it as a style issue that's lower priority than the correctness issues above"
+        }
+      ]
+    },
+    {
+      "id": 45,
+      "name": "disabled-linters-with-rationale",
+      "description": "Tests understanding of which linters should be disabled and why — the recommended config explicitly disables several with reasons",
+      "prompt": "A colleague wants to enable these linters in our .golangci.yml: exhaustruct, gochecknoglobals, wrapcheck, mnd (magic number detector), and varnamelen. Should we? Explain your reasoning for each.",
+      "trap": "Model enables all of them without considering that they are intentionally excluded from the recommended config due to being too noisy, too opinionated, or breaking idiomatic Go patterns.",
+      "assertions": [
+        {
+          "id": "45.1",
+          "text": "Recommends AGAINST exhaustruct — it requires all struct fields to be set, which breaks Go's zero-value idiom and is extremely noisy"
+        },
+        {
+          "id": "45.2",
+          "text": "Recommends AGAINST gochecknoglobals — there are many valid uses for global variables in Go (loggers, registries, etc.) and a blanket ban is too strict"
+        },
+        {
+          "id": "45.3",
+          "text": "Recommends AGAINST wrapcheck as a default — it forces wrapping all external errors, which is too noisy and not always appropriate"
+        },
+        {
+          "id": "45.4",
+          "text": "Recommends AGAINST mnd — magic number detection is extremely noisy, flagging obvious constants like HTTP status codes"
+        },
+        {
+          "id": "45.5",
+          "text": "Recommends AGAINST varnamelen — Go idiomatically favors short variable names, and this linter conflicts with that philosophy"
+        }
+      ]
+    },
+    {
+      "id": 46,
+      "name": "nolintlint-meta-linter",
+      "description": "Tests knowledge that nolintlint enforces proper nolint directive usage and should be enabled",
+      "prompt": "I see //nolint directives scattered throughout our Go codebase. Many are bare '//nolint' without specifying which linter or why. How can I enforce proper nolint hygiene automatically?",
+      "trap": "Model suggests a manual code review process or a custom script instead of enabling the nolintlint linter with require-explanation and require-specific settings.",
+      "assertions": [
+        {
+          "id": "46.1",
+          "text": "Recommends enabling the nolintlint linter — it automatically enforces nolint directive quality"
+        },
+        {
+          "id": "46.2",
+          "text": "Configures nolintlint with require-specific: true to require linter names (not bare //nolint)"
+        },
+        {
+          "id": "46.3",
+          "text": "Configures nolintlint with require-explanation: true to require justification comments"
+        },
+        {
+          "id": "46.4",
+          "text": "Shows the correct config location: linters.settings.nolintlint in .golangci.yml"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "name": "multiple-nolint-comma-syntax",
+      "description": "Tests proper syntax for suppressing multiple linters on one line",
+      "prompt": "I have a line of Go code that triggers both errcheck and gosec warnings. I've confirmed both are false positives in this specific case. How do I suppress both on the same line?",
+      "trap": "Model uses two separate //nolint directives on the same line, or uses //nolint without comma separation, or stacks directives on consecutive lines for the same code line.",
+      "assertions": [
+        {
+          "id": "47.1",
+          "text": "Uses comma-separated linter names in a single directive: //nolint:errcheck,gosec — not two separate //nolint directives"
+        },
+        {
+          "id": "47.2",
+          "text": "Includes a justification comment after the directive explaining why both are false positives"
+        },
+        {
+          "id": "47.3",
+          "text": "The directive is placed on the same line as the flagged code or the line immediately above it"
+        }
+      ]
+    },
+    {
+      "id": 48,
+      "name": "common-config-issues",
+      "description": "Tests troubleshooting knowledge for golangci-lint: timeout, v1-to-v2 migration, linter-not-found",
+      "prompt": "I'm getting these errors with golangci-lint:\n1. 'deadline exceeded' when running on our large monorepo\n2. After upgrading to golangci-lint v2, my .golangci.yml throws config errors\n3. 'linter modernize not found' even though I listed it in enable\n\nHow do I fix each?",
+      "trap": "Model doesn't know about the v2 config migration tool, suggests reinstalling for the linter-not-found issue instead of checking the golangci-lint version, or increases concurrency instead of timeout.",
+      "assertions": [
+        {
+          "id": "48.1",
+          "text": "For deadline exceeded: recommends increasing run.timeout in .golangci.yml (default is 5m, may need 10m+ for large repos)"
+        },
+        {
+          "id": "48.2",
+          "text": "For v1 config errors: recommends running golangci-lint migrate to convert the config format to v2"
+        },
+        {
+          "id": "48.3",
+          "text": "For linter not found: recommends checking the golangci-lint version — modernize requires v2.6.0+ or similar newer version"
+        },
+        {
+          "id": "48.4",
+          "text": "Mentions golangci-lint linters command to check available linters in the installed version"
+        }
+      ]
+    },
+    {
+      "id": 49,
+      "name": "formatter-vs-linter-distinction",
+      "description": "Tests that formatters (gofumpt, gofmt) are configured in the formatters section, not the linters section, and use the fmt subcommand",
+      "prompt": "I want to enforce consistent code formatting in my Go project using golangci-lint. I want gofumpt with extra rules. How do I set it up?",
+      "trap": "Model puts gofumpt in the linters.enable section instead of formatters.enable (v2 distinction), or doesn't mention the golangci-lint fmt subcommand for formatting.",
+      "assertions": [
+        {
+          "id": "49.1",
+          "text": "Configures gofumpt under formatters.enable, NOT linters.enable — formatters are a separate section in golangci-lint v2"
+        },
+        {
+          "id": "49.2",
+          "text": "Sets gofumpt extra-rules: true under formatters.settings.gofumpt"
+        },
+        {
+          "id": "49.3",
+          "text": "Mentions the golangci-lint fmt ./... command for running formatters — separate from golangci-lint run"
+        },
+        {
+          "id": "49.4",
+          "text": "Notes that gci and goimports are redundant with gofumpt and can be disabled"
+        }
+      ]
+    },
+    {
+      "id": 50,
+      "name": "readme-section-order",
+      "prompt": "Write a README.md for a Go library called `github.com/acme/taskflow` that provides a DAG-based task execution engine. It supports parallel execution, dependency resolution, cycle detection, and retry policies. Include installation instructions, a usage example, license info, and any other sections you think are appropriate for a Go open-source library.",
+      "trap": "Model will produce a reasonable README but likely not follow the exact section order: Title > Badges > Summary > Demo > Getting Started > Features > Contributing > License",
+      "assertions": [
+        {
+          "id": "50.1",
+          "text": "Badges section appears immediately after the title heading, before any prose"
+        },
+        {
+          "id": "50.2",
+          "text": "A short summary (1-2 sentences) appears after badges, before any code block or Getting Started section"
+        },
+        {
+          "id": "50.3",
+          "text": "A demo/example code snippet appears before the Getting Started/Installation section"
+        },
+        {
+          "id": "50.4",
+          "text": "Getting Started section with `go get` appears after the demo and before Features"
+        },
+        {
+          "id": "50.5",
+          "text": "Features section is the longest section, appearing after Getting Started"
+        }
+      ]
+    },
+    {
+      "id": 51,
+      "name": "scrambled-readme-reorder",
+      "prompt": "I wrote a README for my Go library `github.com/acme/ratelimit` but my team says the sections are in the wrong order. Can you reorganize it following Go open-source best practices? Keep the content, just fix the order:\n\n```markdown\n# ratelimit\n\n## Getting Started\n```bash\ngo get github.com/acme/ratelimit\n```\n\n## Features\n- Token bucket algorithm\n- Redis backend support\n- Per-key rate limiting\n- Middleware for net/http\n\nA high-performance, distributed rate limiter for Go applications.\n\n## License\nMIT License - see LICENSE file.\n\n[![Build Status](https://img.shields.io/github/actions/workflow/status/acme/ratelimit/test.yml)](https://github.com/acme/ratelimit/actions)\n\n## Contributing\nSee CONTRIBUTING.md\n\n```go\nlimiter := ratelimit.New(ratelimit.WithRate(100, time.Second))\nif limiter.Allow(\"user-123\") {\n    // process request\n}\n```\n```\n",
+      "trap": "The README has sections in wrong order: Getting Started > Features > Summary (unlabeled) > License > Badges (unlabeled) > Contributing > Demo (unlabeled). Without skill the model might rearrange reasonably but miss the exact prescribed order or miss that Summary/Badges/Demo need their own placement",
+      "assertions": [
+        {
+          "id": "51.1",
+          "text": "Badges appear immediately after the title, before the summary text"
+        },
+        {
+          "id": "51.2",
+          "text": "The summary sentence ('A high-performance...') appears after badges, before the demo code"
+        },
+        {
+          "id": "51.3",
+          "text": "The demo code snippet (limiter := ...) appears before the Getting Started section"
+        },
+        {
+          "id": "51.4",
+          "text": "Getting Started appears after demo and before Features"
+        },
+        {
+          "id": "51.5",
+          "text": "Contributing and License appear at the end, after Features"
+        }
+      ]
+    },
+    {
+      "id": 52,
+      "name": "doc-comment-why-not-what",
+      "prompt": "Write a godoc comment for this Go function. Make it comprehensive:\n\n```go\nfunc Merge(dst, src map[string]interface{}, overwrite bool) map[string]interface{} {\n    if dst == nil {\n        dst = make(map[string]interface{})\n    }\n    for k, v := range src {\n        if _, exists := dst[k]; !exists || overwrite {\n            dst[k] = v\n        }\n    }\n    return dst\n}\n```",
+      "trap": "Model might just restate: 'Merge merges two maps'. Skill teaches why/when/constraints, Parameters section, Returns section, error cases",
+      "assertions": [
+        {
+          "id": "52.1",
+          "text": "Comment starts with 'Merge' followed by a verb phrase (godoc convention)"
+        },
+        {
+          "id": "52.2",
+          "text": "Includes a Parameters section listing dst, src, and overwrite with descriptions"
+        },
+        {
+          "id": "52.3",
+          "text": "Explains the overwrite behavior (when true vs false)"
+        },
+        {
+          "id": "52.4",
+          "text": "Documents nil dst handling (creates new map)"
+        },
+        {
+          "id": "52.5",
+          "text": "Includes an inline code Example section showing usage"
+        }
+      ]
+    },
+    {
+      "id": 53,
+      "name": "small-package-no-doc-go",
+      "prompt": "I have a Go package with 2 files: `handler.go` and `middleware.go`. My teammate suggests I should create a `doc.go` file for the package-level documentation comment. Is that the right approach? Where should I put the package comment?",
+      "trap": "Model without skill might agree to create doc.go (it's a common pattern). Skill teaches: doc.go is for packages with 3+ files; for small packages, put the comment at the top of the main .go file",
+      "assertions": [
+        {
+          "id": "53.1",
+          "text": "Advises AGAINST creating doc.go for a 2-file package"
+        },
+        {
+          "id": "53.2",
+          "text": "Recommends placing the package comment at the top of the main .go file (handler.go)"
+        },
+        {
+          "id": "53.3",
+          "text": "Mentions the 3+ files threshold for when doc.go becomes appropriate"
+        },
+        {
+          "id": "53.4",
+          "text": "Shows the `// Package ... ` format starting with the Package keyword"
+        },
+        {
+          "id": "53.5",
+          "text": "Explains that doc.go is for larger packages where no single file is the obvious home"
+        }
+      ]
+    },
+    {
+      "id": 54,
+      "name": "example-test-naming",
+      "prompt": "Write Example test functions for this Go library function that converts temperatures. I need examples for: basic Celsius to Fahrenheit, Fahrenheit to Celsius, and Kelvin to Celsius conversions.\n\n```go\npackage tempconv\n\n// Convert converts a temperature from one unit to another.\nfunc Convert(value float64, from, to Unit) float64 { ... }\n```",
+      "trap": "Model might name multiple examples as ExampleConvert1/ExampleConvert2 or ExampleConvertCelsiusToFahrenheit (capitalized suffix). Skill teaches lowercase suffix convention.",
+      "assertions": [
+        {
+          "id": "54.1",
+          "text": "Uses external test package (package tempconv_test)"
+        },
+        {
+          "id": "54.2",
+          "text": "Multiple examples use lowercase suffix: ExampleConvert_celsiusToFahrenheit or similar lowercase pattern"
+        },
+        {
+          "id": "54.3",
+          "text": "Every example includes an // Output: comment for go test verification"
+        },
+        {
+          "id": "54.4",
+          "text": "Examples use fmt.Println to print results (not fmt.Printf)"
+        },
+        {
+          "id": "54.5",
+          "text": "Examples import the package and call tempconv.Convert (external test package pattern)"
+        }
+      ]
+    },
+    {
+      "id": 55,
+      "name": "contributing-10min-rule",
+      "prompt": "Write a CONTRIBUTING.md for a Go project that requires: PostgreSQL 15, Redis 7, Elasticsearch 8, Go 1.22+, and protoc for gRPC code generation. The test suite takes about 3 minutes to run. Building requires running `protoc` first, then `go generate`, then `go build`.",
+      "trap": "Complex setup with 5 dependencies. Model might just list prerequisites. Skill teaches the 10-minute rule and suggests Makefile, docker-compose, devcontainer",
+      "assertions": [
+        {
+          "id": "55.1",
+          "text": "Includes a Makefile or mentions make targets (make build, make test, make lint)"
+        },
+        {
+          "id": "55.2",
+          "text": "Includes docker-compose.yml for running PostgreSQL, Redis, and Elasticsearch locally"
+        },
+        {
+          "id": "55.3",
+          "text": "Provides a Quick Start section showing clone-to-running-tests in a few commands"
+        },
+        {
+          "id": "55.4",
+          "text": "Mentions or provides devcontainer configuration for consistent environments"
+        },
+        {
+          "id": "55.5",
+          "text": "Separates unit tests (fast, no deps) from integration tests (needs services)"
+        }
+      ]
+    },
+    {
+      "id": 56,
+      "name": "security-fix-miscategorized",
+      "prompt": "We use Keep a Changelog format. A junior developer wrote this CHANGELOG entry for our new release. Is it correct?\n\n```markdown\n## [2.3.0] - 2026-04-10\n\n### Added\n- New streaming API for large file transfers\n- Support for HTTP/3\n\n### Fixed\n- Null pointer dereference when config is missing\n- Deserialization flaw allowing arbitrary code execution via malformed input (GHSA-xxxx-yyyy-zzzz)\n- Off-by-one error in retry backoff calculation\n\n### Changed\n- Connection pool default size increased to 50\n```",
+      "trap": "The GHSA vulnerability is listed under Fixed. Per Keep a Changelog format, security fixes belong in a dedicated ### Security section. A model without skill knowledge treats all bug fixes as Fixed and has no reason to split them. The model must know that Keep a Changelog defines Security as its own top-level category.",
+      "assertions": [
+        {
+          "id": "56.1",
+          "text": "Identifies that the GHSA/deserialization fix belongs in a dedicated ### Security section, not ### Fixed"
+        },
+        {
+          "id": "56.2",
+          "text": "Recommends creating a ### Security subsection that is separate from ### Fixed"
+        },
+        {
+          "id": "56.3",
+          "text": "Keeps the null pointer and off-by-one fixes under ### Fixed — they are bugs, not vulnerabilities"
+        },
+        {
+          "id": "56.4",
+          "text": "Does not move non-security bugs into the Security section"
+        },
+        {
+          "id": "56.5",
+          "text": "Notes that the Security category exists as its own top-level changelog category, not a subcategory of Fixed"
+        }
+      ]
+    },
+    {
+      "id": 57,
+      "name": "llms-txt",
+      "prompt": "I have a Go library `github.com/acme/querybuilder` that provides a type-safe SQL query builder. It has these main types: Builder, Query, Condition, JoinClause. Main functions: New(), Select(), Insert(), Update(), Delete(). Errors: ErrInvalidColumn, ErrMissingTable. I want to make my library more accessible to AI coding assistants. What should I do and can you create any needed files?",
+      "trap": "Model without skill won't know about llms.txt convention. Might suggest better README or doc comments only.",
+      "assertions": [
+        {
+          "id": "57.1",
+          "text": "Creates or recommends creating an llms.txt file at the repository root"
+        },
+        {
+          "id": "57.2",
+          "text": "llms.txt includes an Overview section explaining what the library does"
+        },
+        {
+          "id": "57.3",
+          "text": "llms.txt includes Key Concepts or API Reference listing the main types and functions"
+        },
+        {
+          "id": "57.4",
+          "text": "llms.txt includes Common Patterns section with code examples"
+        },
+        {
+          "id": "57.5",
+          "text": "Mentions registering for discoverability platforms (Context7, DeepWiki, or similar)"
+        }
+      ]
+    },
+    {
+      "id": 58,
+      "name": "brief-doc-comment-trap",
+      "prompt": "Write a brief, one-line doc comment for this exported Go function. Keep it short — I don't want verbose documentation cluttering the code:\n\n```go\npackage retry\n\nfunc Do(ctx context.Context, maxAttempts int, delay time.Duration, backoff float64, fn func() error) error {\n    var lastErr error\n    for i := 0; i < maxAttempts; i++ {\n        if err := fn(); err != nil {\n            lastErr = err\n            select {\n            case <-ctx.Done():\n                return ctx.Err()\n            case <-time.After(delay):\n                delay = time.Duration(float64(delay) * backoff)\n            }\n            continue\n        }\n        return nil\n    }\n    return lastErr\n}\n```",
+      "trap": "User explicitly asks for 'brief, one-line'. Without skill, model complies and writes a minimal one-liner. With skill, the model should STILL write a comprehensive comment because the skill says every exported function MUST have a doc comment with Parameters, Returns, and Example sections",
+      "assertions": [
+        {
+          "id": "58.1",
+          "text": "Comment starts with 'Do' followed by a verb phrase (godoc convention)"
+        },
+        {
+          "id": "58.2",
+          "text": "Includes a Parameters section or describes each parameter (ctx, maxAttempts, delay, backoff, fn)"
+        },
+        {
+          "id": "58.3",
+          "text": "Documents the exponential backoff behavior (delay multiplied by backoff factor)"
+        },
+        {
+          "id": "58.4",
+          "text": "Documents context cancellation behavior (returns ctx.Err())"
+        },
+        {
+          "id": "58.5",
+          "text": "Includes an inline Example section showing a realistic usage pattern"
+        }
+      ]
+    },
+    {
+      "id": 59,
+      "name": "review-restating-comments",
+      "prompt": "Review these doc comments. My team says our documentation is solid. Do you see any issues?\n\n```go\npackage cache\n\n// Get gets a value from the cache by key.\n// Returns the value and true if found, zero value and false if not.\nfunc (c *Cache) Get(key string) (interface{}, bool) { ... }\n\n// Set sets a value in the cache for the given key.\nfunc (c *Cache) Set(key string, value interface{}) { ... }\n\n// Delete deletes a value from the cache by key.\nfunc (c *Cache) Delete(key string) { ... }\n\n// Size returns the number of items currently in the cache.\nfunc (c *Cache) Size() int { ... }\n\n// Clear clears all items from the cache.\nfunc (c *Cache) Clear() { ... }\n```",
+      "trap": "Team says docs are 'solid', creating social pressure to agree. All comments describe what the code does but not why/when/constraints — they omit thread safety, TTL/eviction behavior, and cache miss semantics. The skill requires comments to explain WHY and WHEN, not just WHAT.",
+      "assertions": [
+        {
+          "id": "59.1",
+          "text": "Identifies that the comments describe WHAT the code does but fail to explain WHY, WHEN, or any constraints"
+        },
+        {
+          "id": "59.2",
+          "text": "Points out that Get is missing thread-safety documentation (is it safe for concurrent use?)"
+        },
+        {
+          "id": "59.3",
+          "text": "Points out that Set is missing documentation on what happens if the key already exists and whether there is a TTL or capacity limit"
+        },
+        {
+          "id": "59.4",
+          "text": "Rewrites at least one comment to include constraints, edge cases, or concurrent-use guarantees"
+        },
+        {
+          "id": "59.5",
+          "text": "Does NOT simply agree that the docs are solid without identifying the missing context"
+        }
+      ]
+    },
+    {
+      "id": 60,
+      "name": "skip-test-func-comments",
+      "prompt": "I'm adding doc comments to every function in my Go project to reach 100% documentation coverage. Please add appropriate doc comments to these test functions:\n\n```go\npackage auth_test\n\nfunc TestValidateToken(t *testing.T) { ... }\nfunc TestValidateToken_expired(t *testing.T) { ... }\nfunc TestValidateToken_invalidSignature(t *testing.T) { ... }\nfunc BenchmarkValidateToken(b *testing.B) { ... }\nfunc TestHashPassword(t *testing.T) { ... }\nfunc TestComparePassword(t *testing.T) { ... }\n```",
+      "trap": "User explicitly asks to add doc comments to test functions citing '100% documentation coverage'. Without skill, model complies and writes comments for each test. The skill's 'What to Document' table explicitly says 'Test functions: No' and the model should push back on this request.",
+      "assertions": [
+        {
+          "id": "60.1",
+          "text": "Advises against or actively discourages adding doc comments to test functions"
+        },
+        {
+          "id": "60.2",
+          "text": "Explains that test function names are designed to be self-descriptive — the name IS the documentation"
+        },
+        {
+          "id": "60.3",
+          "text": "Does NOT produce doc comments for any of the standard Test/Benchmark functions listed"
+        },
+        {
+          "id": "60.4",
+          "text": "Clarifies that '100% documentation coverage' tools do not count unexported or test functions — this goal does not apply here"
+        },
+        {
+          "id": "60.5",
+          "text": "May suggest that complex test setup helpers warrant comments, but not the standard TestXxx/BenchmarkXxx functions themselves"
+        }
+      ]
+    },
+    {
+      "id": 61,
+      "name": "simple-crud-no-file-desc",
+      "prompt": "I have a Go file `user_handler.go` (120 lines) that contains standard CRUD HTTP handlers for a User resource: CreateUser, GetUser, UpdateUser, DeleteUser, and ListUsers. Each handler does basic JSON decode, calls a service, and returns a JSON response. Should I add a file-level description comment with an architecture diagram like I did for my scheduler file?",
+      "trap": "User references having added a file description to a complex scheduler file and wants to do the same for a simple CRUD handler. Without skill, model might agree or add unnecessary documentation. With skill, model should say NO — simple CRUD handlers don't warrant file-level descriptions per the 'When to Add File Descriptions' table",
+      "assertions": [
+        {
+          "id": "61.1",
+          "text": "Advises against adding a file-level description for this CRUD handler"
+        },
+        {
+          "id": "61.2",
+          "text": "Explains that simple CRUD handlers don't warrant the same treatment as complex algorithms"
+        },
+        {
+          "id": "61.3",
+          "text": "Distinguishes between when file descriptions ARE needed (algorithms, state machines, 200+ lines of complex logic) vs not needed (CRUD, data models)"
+        },
+        {
+          "id": "61.4",
+          "text": "Still recommends good doc comments on the individual exported handler functions"
+        },
+        {
+          "id": "61.5",
+          "text": "Does NOT produce an ASCII art diagram or elaborate file-level description"
+        }
+      ]
+    },
+    {
+      "id": 62,
+      "name": "file-level-description",
+      "prompt": "I have a Go file `scheduler.go` that implements a priority-queue-based task scheduler using container/heap. It supports recurring tasks, one-shot tasks, task cancellation, and graceful shutdown with a drain timeout. A single dispatcher goroutine polls the heap. The file is 350 lines. Should I add any special documentation to this file, and if so, what?",
+      "trap": "Model might just say 'add function comments'. Skill teaches file-level description with ASCII art architecture diagram for complex files",
+      "assertions": [
+        {
+          "id": "62.1",
+          "text": "Recommends a file-level description comment (not just function comments)"
+        },
+        {
+          "id": "62.2",
+          "text": "Suggests including an ASCII art diagram showing the scheduler architecture/flow"
+        },
+        {
+          "id": "62.3",
+          "text": "Places the file description below imports (not above package declaration)"
+        },
+        {
+          "id": "62.4",
+          "text": "Description explains the algorithm/design (priority queue, dispatcher goroutine)"
+        },
+        {
+          "id": "62.5",
+          "text": "Notes the 200+ line threshold or 'complex algorithm' as reason for adding the description"
+        }
+      ]
+    },
+    {
+      "id": 63,
+      "name": "grpc-api-docs",
+      "prompt": "I have a Go gRPC service for user management. The proto file currently has no comments at all. A teammate says I should use swaggo/swag since we already use it for our REST API. What's the right way to document a gRPC API?",
+      "trap": "Teammate explicitly suggests swaggo/swag for gRPC. The model must know that swaggo/swag generates OpenAPI from Go HTTP annotations — it has no concept of protobufs. Without skill knowledge, the model might go along with the suggestion or give a vague answer. With skill, the model knows proto files are the source of truth and buf is the right tool.",
+      "assertions": [
+        {
+          "id": "63.1",
+          "text": "Clearly states that swaggo/swag is NOT the right tool for gRPC — it generates OpenAPI for REST APIs, not protobuf documentation"
+        },
+        {
+          "id": "63.2",
+          "text": "States that proto files themselves serve as the API contract AND documentation — add comments there"
+        },
+        {
+          "id": "63.3",
+          "text": "Recommends adding comments directly to proto messages, services, and RPCs"
+        },
+        {
+          "id": "63.4",
+          "text": "Recommends buf for proto linting and breaking change detection"
+        },
+        {
+          "id": "63.5",
+          "text": "Mentions grpc-gateway as an option for projects needing both REST and gRPC from the same proto"
+        }
+      ]
+    },
+    {
+      "id": 64,
+      "name": "app-disguised-as-library",
+      "prompt": "I'm building a Go project at `github.com/acme/datactl`. The project structure is:\n```\ncmd/\n  datactl/\n    main.go\ninternal/\n  ingester/\n  transformer/\n  exporter/\npkg/\n  config/\n  client/\ngo.mod\n```\nThe `pkg/` directory exports a client SDK that other teams import. The `cmd/` directory builds the CLI binary. What documentation strategy should I use? Should I write ExampleXxx tests and Playground demos for the exported packages?",
+      "trap": "Project is BOTH a library (pkg/) AND an application (cmd/). Without skill, model might treat it as one or the other. With skill, model should detect both types and apply different documentation strategies: ExampleXxx for pkg/, CLI help + install methods for cmd/",
+      "assertions": [
+        {
+          "id": "64.1",
+          "text": "Identifies this as BOTH a library (pkg/) AND an application (cmd/) — not just one type"
+        },
+        {
+          "id": "64.2",
+          "text": "Recommends ExampleXxx test functions for the pkg/client and pkg/config packages (library part)"
+        },
+        {
+          "id": "64.3",
+          "text": "Recommends CLI --help text and multiple installation methods for the cmd/datactl binary (application part)"
+        },
+        {
+          "id": "64.4",
+          "text": "Recommends configuration documentation (env vars, config files, flags) for the CLI"
+        },
+        {
+          "id": "64.5",
+          "text": "Does NOT recommend Playground demos for internal/ packages (they are not importable by external users)"
+        }
+      ]
+    },
+    {
+      "id": 65,
+      "name": "existing-contributing-improve",
+      "prompt": "Our Go project requires PostgreSQL and Redis. This is our current CONTRIBUTING.md. Improve it:\n\n```markdown\n# Contributing\n\n## Prerequisites\n- Go 1.22+\n- PostgreSQL 15\n- Redis 7\n\n## Setup\n1. Install Go from https://go.dev\n2. Install PostgreSQL from https://www.postgresql.org/download/\n3. Install Redis from https://redis.io/download/\n4. Create a database: `createdb myapp_test`\n5. Run `go build ./...`\n6. Run `go test ./...`\n\n## Pull Requests\nPlease open a PR against the main branch.\n```",
+      "trap": "The existing CONTRIBUTING requires manual installation of PostgreSQL and Redis — time-consuming and error-prone. Without skill, model might polish the text or add small improvements. With skill, model should apply the 10-minute rule: replace manual installs with docker-compose, add Makefile, suggest devcontainer",
+      "assertions": [
+        {
+          "id": "65.1",
+          "text": "Adds docker-compose.yml to replace manual PostgreSQL and Redis installation"
+        },
+        {
+          "id": "65.2",
+          "text": "Adds a Makefile with targets (make build, make test, make lint, or similar)"
+        },
+        {
+          "id": "65.3",
+          "text": "Reduces the setup steps to 3 or fewer commands (e.g., clone, docker-compose up, make test)"
+        },
+        {
+          "id": "65.4",
+          "text": "Mentions or suggests devcontainer for consistent environments"
+        },
+        {
+          "id": "65.5",
+          "text": "Separates unit tests (fast, no deps) from integration tests (needs PostgreSQL/Redis)"
+        }
+      ]
+    },
+    {
+      "id": 66,
+      "name": "play-link-doc-comment",
+      "prompt": "I maintain a public Go library. Write a comprehensive doc comment for this function. I need it to show up well on pkg.go.dev — include everything users need to understand it at a glance:\n\n```go\npackage sliceutil\n\nfunc Filter[T any](s []T, predicate func(T) bool) []T {\n    var result []T\n    for _, v := range s {\n        if predicate(v) {\n            result = append(result, v)\n        }\n    }\n    return result\n}\n```",
+      "trap": "Model may write a thorough doc comment but omit the Play: line entirely — it's a niche convention the skill specifically teaches. The Play: line with its exact format (// Play: https://...) is a skill-specific pattern not commonly known.",
+      "assertions": [
+        {
+          "id": "66.1",
+          "text": "Includes a `// Play:` line with a URL pointing to a Go Playground demo"
+        },
+        {
+          "id": "66.2",
+          "text": "The Play: line uses the exact format `// Play: https://go.dev/play/p/...` (not inline, not as a different label)"
+        },
+        {
+          "id": "66.3",
+          "text": "Comment starts with 'Filter' followed by a verb phrase"
+        },
+        {
+          "id": "66.4",
+          "text": "Includes an inline code Example section (tab-indented)"
+        },
+        {
+          "id": "66.5",
+          "text": "Documents that a new slice is returned (original is not modified)"
+        }
+      ]
+    },
+    {
+      "id": 67,
+      "name": "architecture-decision-records",
+      "prompt": "Our Go project has made several important architectural decisions: using PostgreSQL over MongoDB, choosing event-driven architecture with NATS, and using JWT for authentication. How should we document these decisions so future team members understand the rationale?",
+      "trap": "Model might suggest a wiki page or a section in README. Skill teaches docs/architecture/ directory with numbered ADR files",
+      "assertions": [
+        {
+          "id": "67.1",
+          "text": "Recommends a docs/architecture/ directory (not wiki or README section)"
+        },
+        {
+          "id": "67.2",
+          "text": "Uses numbered file format (0001-xxx.md, 0002-xxx.md)"
+        },
+        {
+          "id": "67.3",
+          "text": "Each ADR has Context section explaining the need"
+        },
+        {
+          "id": "67.4",
+          "text": "Each ADR has Design/Decision section explaining what was chosen"
+        },
+        {
+          "id": "67.5",
+          "text": "Each ADR has Consequences section (positive and negative trade-offs)"
+        }
+      ]
+    },
+    {
+      "id": 68,
+      "name": "example-method-naming",
+      "prompt": "Write Example test functions for this Go type and its methods. Cover: creating a new client, making a GET request, making a POST request with a body, and setting custom headers.\n\n```go\npackage httpclient\n\ntype Client struct { ... }\nfunc New(opts ...Option) *Client { ... }\nfunc (c *Client) Get(ctx context.Context, url string) (*Response, error) { ... }\nfunc (c *Client) Post(ctx context.Context, url string, body io.Reader) (*Response, error) { ... }\nfunc (c *Client) SetHeader(key, value string) { ... }\n```",
+      "trap": "The method example naming convention (ExampleClient_Get, ExampleClient_Post) is less well known than the function convention. Without the skill, the model may write ExampleGetRequest, ExamplePost, ExampleClient_GetRequest (mixing conventions), or use capitalized suffixes. The exact pattern is TypeName_MethodName.",
+      "assertions": [
+        {
+          "id": "68.1",
+          "text": "Uses ExampleNew or ExampleClient for the constructor example — NOT ExampleNewClient (which stutters) or ExampleNew_client"
+        },
+        {
+          "id": "68.2",
+          "text": "Uses ExampleClient_Get for the GET request example (TypeName_MethodName convention with capital method name)"
+        },
+        {
+          "id": "68.3",
+          "text": "Uses ExampleClient_Post for the POST request example (same TypeName_MethodName pattern)"
+        },
+        {
+          "id": "68.4",
+          "text": "Every example includes an // Output: comment"
+        },
+        {
+          "id": "68.5",
+          "text": "Uses external test package (package httpclient_test)"
+        }
+      ]
+    },
+    {
+      "id": 69,
+      "name": "discoverability-registration",
+      "prompt": "I just published my Go library on GitHub (public repo, MIT license, tagged v1.0.0). I have a good README, doc comments, ExampleXxx tests, and a CHANGELOG. What else should I do to make sure developers and AI tools can find and use my library?",
+      "trap": "Model without skill knowledge of the specific platforms will give generic answers: 'share on social media', 'write a blog post', 'submit to HackerNews'. The skill teaches specific discoverability platforms: Context7, DeepWiki, OpenDeep, zRead — names the model won't know without the skill.",
+      "assertions": [
+        {
+          "id": "69.1",
+          "text": "Recommends registering with Context7 (context7.com) specifically for AI-accessible documentation"
+        },
+        {
+          "id": "69.2",
+          "text": "Recommends registering with DeepWiki (deepwiki.com) specifically"
+        },
+        {
+          "id": "69.3",
+          "text": "Recommends adding an llms.txt file at the repository root"
+        },
+        {
+          "id": "69.4",
+          "text": "Recommends adding Go Playground demos linked from doc comments with the // Play: format"
+        },
+        {
+          "id": "69.5",
+          "text": "Names at least 3 specific discoverability platforms (from: Context7, DeepWiki, OpenDeep, zRead) — not generic promotion advice"
+        }
+      ]
+    },
+    {
+      "id": 70,
+      "name": "deprecated-marker-format",
+      "prompt": "I'm deprecating a function in my Go library. The old function is `ParseDuration` and the new replacement is `ParseDurationStrict`. Write the doc comment for the deprecated function. Also, I want to make sure automated tools and pkg.go.dev show it as deprecated correctly.",
+      "trap": "Model might use a freeform deprecation notice (e.g., 'This function is deprecated, use X instead') instead of the specific godoc Deprecated: marker format that tools recognize. The exact format with 'Deprecated:' on its own paragraph line is required for godoc rendering and tooling detection",
+      "assertions": [
+        {
+          "id": "70.1",
+          "text": "Uses the exact 'Deprecated:' marker (capital D, colon, space) on its own comment paragraph line — this is the format godoc and tools recognize"
+        },
+        {
+          "id": "70.2",
+          "text": "Includes the replacement function name (ParseDurationStrict) after the Deprecated: marker"
+        },
+        {
+          "id": "70.3",
+          "text": "Mentions a version or timeline for removal (e.g., 'will be removed in v3.0.0')"
+        }
+      ]
+    }
+  ]
+}

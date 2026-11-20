@@ -7,6 +7,90 @@
       "sourceType": "github",
       "skillPath": "skills/ce-simplify-code/SKILL.md",
       "computedHash": "6413ae2f594027094b92fcd90f37b83b3665afd00b5d6b2dd4b3a1b8c73c4bd0"
+    },
+    "golang-architecture": {
+      "source": "eric642/golang-skills",
+      "commit": "6e715659994be95ef788c14d0a044145256e34d6",
+      "sourceType": "github",
+      "skillPath": "skills/golang-architecture/SKILL.md",
+      "computedHash": "ccd5917afc2924a73bfd0b8eff0e89131e5efcb429f88cf231e44122a6afb2a8"
+    },
+    "golang-ci": {
+      "source": "eric642/golang-skills",
+      "commit": "6e715659994be95ef788c14d0a044145256e34d6",
+      "sourceType": "github",
+      "skillPath": "skills/golang-ci/SKILL.md",
+      "computedHash": "67f1c728a34257b0fd910e95fca5c598984ebdb0b689a25e04df5247b5c071ce"
+    },
+    "golang-code-quality": {
+      "source": "eric642/golang-skills",
+      "commit": "6e715659994be95ef788c14d0a044145256e34d6",
+      "sourceType": "github",
+      "skillPath": "skills/golang-code-quality/SKILL.md",
+      "computedHash": "9541ba8e4de68cfd52224c93ef7df962ff461f492cfa29d98934f8a7fcacff18"
+    },
+    "golang-concurrency": {
+      "source": "eric642/golang-skills",
+      "commit": "6e715659994be95ef788c14d0a044145256e34d6",
+      "sourceType": "github",
+      "skillPath": "skills/golang-concurrency/SKILL.md",
+      "computedHash": "14581cf1940b19c3c9b73b37002d70609daa11efa1fcfeb16f748080c312e0a9"
+    },
+    "golang-database": {
+      "source": "eric642/golang-skills",
+      "commit": "6e715659994be95ef788c14d0a044145256e34d6",
+      "sourceType": "github",
+      "skillPath": "skills/golang-database/SKILL.md",
+      "computedHash": "7f3b3e37b95d17819d9d3b7ddde338857ec93f3973e6f7660ca8215e58351c19"
+    },
+    "golang-dependencies": {
+      "source": "eric642/golang-skills",
+      "commit": "6e715659994be95ef788c14d0a044145256e34d6",
+      "sourceType": "github",
+      "skillPath": "skills/golang-dependencies/SKILL.md",
+      "computedHash": "8f723b1b3dd2a9639a5d381c6cd4ad393fd2582b07e97e3ff960e4e2b9b996af"
+    },
+    "golang-idioms": {
+      "source": "eric642/golang-skills",
+      "commit": "6e715659994be95ef788c14d0a044145256e34d6",
+      "sourceType": "github",
+      "skillPath": "skills/golang-idioms/SKILL.md",
+      "computedHash": "3c4d8f264d9ab21c66803497ce8765e2486362623ac6b6e3cc41b13a46772d5c"
+    },
+    "golang-observability": {
+      "source": "eric642/golang-skills",
+      "commit": "6e715659994be95ef788c14d0a044145256e34d6",
+      "sourceType": "github",
+      "skillPath": "skills/golang-observability/SKILL.md",
+      "computedHash": "f4b2875cc4bd6ce0f3900513746a1b3fd888cb2adf49e6fdb35808f2edb24ff0"
+    },
+    "golang-performance": {
+      "source": "eric642/golang-skills",
+      "commit": "6e715659994be95ef788c14d0a044145256e34d6",
+      "sourceType": "github",
+      "skillPath": "skills/golang-performance/SKILL.md",
+      "computedHash": "e90240d0af89c4cf4ac9e1c55615f8c339ba3c0cbb2bae4caaa0b04461b11ac2"
+    },
+    "golang-refactoring": {
+      "source": "eric642/golang-skills",
+      "commit": "6e715659994be95ef788c14d0a044145256e34d6",
+      "sourceType": "github",
+      "skillPath": "skills/golang-refactoring/SKILL.md",
+      "computedHash": "ef37b92a6906b5abc30c45336169bb6d9ebb54df7a422f8d3e11aa8bf48c2922"
+    },
+    "golang-security": {
+      "source": "eric642/golang-skills",
+      "commit": "6e715659994be95ef788c14d0a044145256e34d6",
+      "sourceType": "github",
+      "skillPath": "skills/golang-security/SKILL.md",
+      "computedHash": "fe6699adc6f41cfc04fe715162db3a0897bf9202b82eb21708c526224b5c88e8"
+    },
+    "golang-testing": {
+      "source": "eric642/golang-skills",
+      "commit": "6e715659994be95ef788c14d0a044145256e34d6",
+      "sourceType": "github",
+      "skillPath": "skills/golang-testing/SKILL.md",
+      "computedHash": "7f8d443976ae57f678fe3b3b366c1f71bc85c0eefd4f283cb32a2d0f9e703feb"
     }
   }
 }

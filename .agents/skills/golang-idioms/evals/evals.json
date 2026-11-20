@@ -1,0 +1,2018 @@
+{
+  "skill_name": "golang-idioms",
+  "evals": [
+    {
+      "id": 1,
+      "name": "interface-at-consumer-not-implementor",
+      "description": "Tests whether the model defines interfaces where they are consumed, not where they are implemented",
+      "prompt": "I'm writing a Go notification service that can send emails. I have an email package with a Client struct that has a Send method. I also have a notification package that needs to use this email client. Where should I define the interface?",
+      "trap": "Without the skill, the model often puts the interface in the email package (the implementor). The skill says interfaces MUST be defined where consumed, not where implemented.",
+      "assertions": [
+        {
+          "id": "1.1",
+          "text": "Interface is defined in the notification package (the consumer), NOT in the email package"
+        },
+        {
+          "id": "1.2",
+          "text": "Interface has only the methods the notification package needs (not the full email.Client API)"
+        },
+        {
+          "id": "1.3",
+          "text": "Email package exports a concrete Client struct, not an interface"
+        },
+        {
+          "id": "1.4",
+          "text": "Explains WHY: keeps the consumer in control of the contract, avoids importing a package just for its interface"
+        },
+        {
+          "id": "1.5",
+          "text": "Notification service depends on its own interface, not on email package types"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "return-structs-not-interfaces",
+      "description": "Tests whether the model returns concrete types from constructors, not interfaces",
+      "prompt": "I'm designing a Go package with a UserService that depends on a UserStore interface. Should my NewUserService constructor return *UserService or UserServiceInterface? Show me the constructor signature.",
+      "trap": "Without the skill, the model may suggest returning an interface for 'flexibility' or 'abstraction'. The skill says functions SHOULD return concrete types -- NEVER return interfaces from constructors.",
+      "assertions": [
+        {
+          "id": "2.1",
+          "text": "Constructor returns *UserService (concrete type), NOT an interface"
+        },
+        {
+          "id": "2.2",
+          "text": "Constructor accepts UserStore as an interface parameter (accept interfaces)"
+        },
+        {
+          "id": "2.3",
+          "text": "Explains WHY: callers get full access to the concrete type's fields/methods; consumers can assign to interface if needed"
+        },
+        {
+          "id": "2.4",
+          "text": "Explicitly states that returning interfaces from constructors is bad practice"
+        },
+        {
+          "id": "2.5",
+          "text": "The accept-interfaces-return-structs principle is stated or demonstrated"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "premature-interface-trap",
+      "description": "Tests whether the model avoids creating interfaces prematurely when there is only one implementation",
+      "prompt": "I'm writing a Go application with a UserRepository that talks to PostgreSQL. It's the only database we'll ever use. Should I create a UserRepository interface and a concrete postgresUserRepository struct, or just use a concrete struct directly?",
+      "trap": "Without the skill, the model almost always suggests creating an interface 'for testability' even with a single implementation. The skill says NEVER create interfaces prematurely -- wait for 2+ implementations or a testability requirement.",
+      "assertions": [
+        {
+          "id": "3.1",
+          "text": "Recommends starting with a concrete struct (not an interface) when there is only one implementation"
+        },
+        {
+          "id": "3.2",
+          "text": "Mentions the principle: don't design with interfaces, discover them"
+        },
+        {
+          "id": "3.3",
+          "text": "Suggests extracting an interface LATER when a second consumer or test mock demands it"
+        },
+        {
+          "id": "3.4",
+          "text": "Acknowledges that testability IS a valid reason to add an interface, but it should be a deliberate choice"
+        },
+        {
+          "id": "3.5",
+          "text": "Does NOT reflexively recommend creating an interface just because it is a repository"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "zero-value-useful-design",
+      "description": "Tests whether the model designs structs with useful zero values using lazy initialization",
+      "prompt": "I have a Go Registry struct that stores items in a map. Users are getting panics when they call Register without calling NewRegistry first. How should I fix this?",
+      "trap": "Without the skill, the model may just say 'always call the constructor' or add nil checks at every call site. The skill says to make the zero value useful with lazy initialization.",
+      "assertions": [
+        {
+          "id": "4.1",
+          "text": "Recommends lazy initialization in the Register method (if r.items == nil { r.items = make(...) })"
+        },
+        {
+          "id": "4.2",
+          "text": "Mentions the Go principle: make the zero value useful"
+        },
+        {
+          "id": "4.3",
+          "text": "The fix allows using var r Registry without calling a constructor"
+        },
+        {
+          "id": "4.4",
+          "text": "Does NOT just say 'always use the constructor' as the primary fix"
+        },
+        {
+          "id": "4.5",
+          "text": "References bytes.Buffer or sync.Mutex as stdlib examples of useful zero values"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "name": "embedding-vs-named-field",
+      "description": "Tests whether the model correctly distinguishes when to embed vs use a named field",
+      "prompt": "I have a Go Server struct that uses a DataStore for persistence and an http.Handler for routing. Should I embed both, use named fields for both, or mix? The Server should expose the Handler's ServeHTTP method but should NOT expose DataStore's internal methods to callers.",
+      "trap": "Without the skill, the model may embed both or use named fields for both. The skill has a clear rule: embed when you want to promote the full API ('is a'), named field when you only need it internally ('has a').",
+      "assertions": [
+        {
+          "id": "5.1",
+          "text": "Embeds http.Handler (to promote ServeHTTP to the Server)"
+        },
+        {
+          "id": "5.2",
+          "text": "Uses a named field for DataStore (not embedded, because its methods should not be exposed)"
+        },
+        {
+          "id": "5.3",
+          "text": "Explains the embed vs named field rule: embed for 'is a' (promote full API), named field for 'has a' (internal use)"
+        },
+        {
+          "id": "5.4",
+          "text": "Mentions that embedding promotes ALL methods of the inner type, which can be undesirable"
+        },
+        {
+          "id": "5.5",
+          "text": "Notes that the receiver of promoted methods is the inner type, not the outer type"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "name": "compile-time-interface-check",
+      "description": "Tests whether the model uses compile-time interface verification",
+      "prompt": "I have a Go type MyBuffer that should implement io.ReadWriter. How can I make sure the compiler catches it if I accidentally break the interface contract later?",
+      "trap": "Without the skill, the model may suggest writing a test or just relying on usage sites to catch it. The skill recommends the var _ Interface = (*Type)(nil) pattern.",
+      "assertions": [
+        {
+          "id": "6.1",
+          "text": "Uses var _ io.ReadWriter = (*MyBuffer)(nil) pattern"
+        },
+        {
+          "id": "6.2",
+          "text": "Places the check near the type definition"
+        },
+        {
+          "id": "6.3",
+          "text": "Explains that this costs nothing at runtime"
+        },
+        {
+          "id": "6.4",
+          "text": "Explains that the build fails immediately if MyBuffer stops satisfying the interface"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "name": "type-assertion-comma-ok",
+      "description": "Bare type assertions panic on wrong type; comma-ok is required even when the type 'should always' be correct",
+      "prompt": "Review this Go event dispatcher and fix any issues:\n\n```go\ntype Event struct {\n    Type    string\n    Payload any\n}\n\nfunc Dispatch(e Event) error {\n    switch e.Type {\n    case \"user.created\":\n        payload := e.Payload.(*UserCreated)\n        return handleUserCreated(payload)\n    case \"order.placed\":\n        payload := e.Payload.(*OrderPlaced)\n        return handleOrderPlaced(payload)\n    case \"payment.failed\":\n        payload := e.Payload.(*PaymentFailed)\n        return handlePaymentFailed(payload)\n    default:\n        return fmt.Errorf(\"unknown event type: %s\", e.Type)\n    }\n}\n```\n\nA teammate says: 'The bare type assertions are fine here — we always put the right payload type for each event type, and we control all the callers. The comma-ok form just adds noise and extra if-checks.' Is the teammate correct? Fix the code if needed.",
+      "trap": "The teammate's argument sounds reasonable — the caller controls event construction and should always set the correct payload type. But bare type assertions panic at runtime on any mismatch (future code, deserialized events, tests with wrong setup). The model should reject the teammate's argument and use comma-ok form.",
+      "assertions": [
+        {
+          "id": "7.1",
+          "text": "Rejects the teammate's argument — bare type assertions panic at runtime on any type mismatch, regardless of how controlled the callers seem"
+        },
+        {
+          "id": "7.2",
+          "text": "Uses comma-ok form for all three type assertions: payload, ok := e.Payload.(*UserCreated)"
+        },
+        {
+          "id": "7.3",
+          "text": "Handles the !ok case by returning an error (not panicking) — e.g., 'unexpected payload type for user.created'"
+        },
+        {
+          "id": "7.4",
+          "text": "Explains the failure mode: future code, deserialized events from external sources, or tests with wrong fixture setup will cause unrecoverable panics with bare assertions"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "name": "optional-behavior-type-assertion",
+      "description": "Tests whether the model uses type assertions for optional interface capabilities",
+      "prompt": "I'm writing a Go function that writes data to an io.Writer. Some writers support flushing (like bufio.Writer) but not all. I want to flush after writing IF the writer supports it, but not require all writers to implement Flush. How should I design this?",
+      "trap": "Without the skill, the model may create a WriteAndFlusher interface and require all callers to implement it. The skill shows the optional behavior pattern with type assertion.",
+      "assertions": [
+        {
+          "id": "8.1",
+          "text": "Defines a separate Flusher interface with just the Flush method"
+        },
+        {
+          "id": "8.2",
+          "text": "Function parameter is io.Writer (not a combined interface)"
+        },
+        {
+          "id": "8.3",
+          "text": "Uses type assertion (f, ok := w.(Flusher)) to check for flush capability"
+        },
+        {
+          "id": "8.4",
+          "text": "Only calls Flush if the type assertion succeeds"
+        },
+        {
+          "id": "8.5",
+          "text": "Mentions this pattern is used in the standard library (e.g. http.Flusher, io.ReaderFrom)"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "name": "nocopy-sentinel-struct",
+      "description": "Tests whether the model uses the noCopy sentinel to prevent struct copying",
+      "prompt": "I have a Go struct ConnPool that contains a sync.Mutex and a slice of connections. A junior developer accidentally passed it by value to a function, which caused a data race. How can I prevent this struct from being copied?",
+      "trap": "Without the skill, the model may just say 'always use pointers' or rely on code review. The skill shows the noCopy sentinel pattern that makes go vet catch accidental copies.",
+      "assertions": [
+        {
+          "id": "9.1",
+          "text": "Recommends embedding a noCopy sentinel struct"
+        },
+        {
+          "id": "9.2",
+          "text": "noCopy implements Lock() and Unlock() methods (empty bodies)"
+        },
+        {
+          "id": "9.3",
+          "text": "Explains that go vet will flag copies of structs containing noCopy"
+        },
+        {
+          "id": "9.4",
+          "text": "Mentions this is the same technique used by sync.WaitGroup, sync.Mutex, or strings.Builder in the stdlib"
+        },
+        {
+          "id": "9.5",
+          "text": "Shows that the struct should be passed by pointer after adding noCopy"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "name": "generics-over-any-interface",
+      "description": "Tests whether the model prefers generics over any/interface{} for type-safe operations",
+      "prompt": "I need to write a Go function that checks if a slice contains a given element. The function should work with any comparable type (ints, strings, etc.). What's the best approach?",
+      "trap": "Without the skill, the model may use []any and any parameters for compatibility. The skill says MUST prefer generics over any for type-safe operations (Go 1.18+).",
+      "assertions": [
+        {
+          "id": "10.1",
+          "text": "Uses generics with a type parameter: func Contains[T comparable](slice []T, target T) bool"
+        },
+        {
+          "id": "10.2",
+          "text": "Does NOT use []any or interface{} parameters"
+        },
+        {
+          "id": "10.3",
+          "text": "Uses the comparable constraint for the type parameter"
+        },
+        {
+          "id": "10.4",
+          "text": "Explains WHY: generics preserve type safety, while any loses it"
+        },
+        {
+          "id": "10.5",
+          "text": "Mentions that any should only be used at true boundaries where type is genuinely unknown (JSON decoding, reflection)"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "name": "receiver-consistency-rule",
+      "description": "Tests whether the model enforces consistent receiver types across all methods of a type",
+      "prompt": "I have a Go struct with 5 methods. Four use value receivers and one uses a pointer receiver because it modifies the struct. Is this fine?",
+      "trap": "Without the skill, the model may accept the mixed receiver approach as valid for each method. The skill says receiver type MUST be consistent -- if one method uses pointer, all should.",
+      "assertions": [
+        {
+          "id": "11.1",
+          "text": "Says mixing pointer and value receivers on the same type is wrong or not recommended"
+        },
+        {
+          "id": "11.2",
+          "text": "Recommends making ALL methods use pointer receivers since one needs to mutate"
+        },
+        {
+          "id": "11.3",
+          "text": "Explains WHY: consistency rule -- if any method uses a pointer receiver, all should"
+        },
+        {
+          "id": "11.4",
+          "text": "Mentions that method sets differ for T and *T which affects interface satisfaction"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "name": "buffer-for-io",
+      "description": "RenderAndStream must use strings.Builder with Grow pre-allocation, not += or strings.Join",
+      "prompt": "Write a function `RenderAndStream(w io.Writer, parts []string) error` in package `render`. It assembles all parts into a single output (joining with newlines), then streams the result to the provided io.Writer.\n\nA teammate suggests: 'Just use strings.Join(parts, \"\\n\") — it's one line and idiomatic.' Another says: 'Use bytes.Buffer, it's the standard Go buffer type.' Implement the most efficient approach and explain if either suggestion is correct.",
+      "assertions": [
+        {
+          "id": "12.1",
+          "text": "Uses strings.Builder (not bytes.Buffer) for string assembly — bytes.Buffer stores []byte and converting to string at the end requires a copy; strings.Builder writes directly to a string",
+          "trap": "Model follows teammate's bytes.Buffer suggestion"
+        },
+        {
+          "id": "12.2",
+          "text": "Calls b.Grow(totalSize) before writing parts — pre-allocating avoids repeated reallocation as the builder grows",
+          "trap": "Model omits Grow even though size is known"
+        },
+        {
+          "id": "12.3",
+          "text": "Does not use strings.Join — it allocates a new string; the goal is to write directly to io.Writer without a redundant intermediate string copy",
+          "trap": "Model accepts the strings.Join suggestion"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "name": "sorted-set",
+      "description": "SortedSet[T] must use cmp.Ordered, not a custom Ordered interface or comparable",
+      "prompt": "Write a `SortedSet[T]` in package `collections` that maintains elements in sorted order. Support Insert(T), Contains(T) bool, Min() (T, bool), Max() (T, bool), and Len() int. Elements must be orderable. Use binary search for efficiency.\n\nA teammate says: 'Define your own `Ordered` interface with a `Less(T) bool` method — it's more flexible and lets users supply custom comparison logic.' Another says: 'Just use `comparable` as the constraint — it works for any type that can be compared.' Which approach is correct?",
+      "assertions": [
+        {
+          "id": "13.1",
+          "text": "Uses `cmp.Ordered` constraint (from the cmp package), not `comparable` (too loose — no < operator) and not a custom Ordered interface with Less() method",
+          "trap": "Model accepts teammate's custom interface or comparable suggestion"
+        },
+        {
+          "id": "13.2",
+          "text": "Rejects the comparable suggestion — comparable only ensures == and != but not < or >, which are required for sorting",
+          "trap": "Model uses comparable thinking it's sufficient for ordered operations"
+        },
+        {
+          "id": "13.3",
+          "text": "Binary search for Insert/Contains using slices.BinarySearch or sort.SearchInts or equivalent O(log n) approach",
+          "trap": "Model linear-scans"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "name": "AddCleanup",
+      "description": "String intern with weak.Pointer + runtime.AddCleanup for auto map shrink",
+      "prompt": "Write a symbol table deduplicator in package `symbols` for Go 1.24+. `func Intern(s string) *string` returns a canonical pointer for equivalent strings. When all external references to the canonical string are dropped, it should be GC'd AND its map entry should be automatically removed (not just become a dead weak pointer — the map must shrink). Thread-safe.",
+      "assertions": [
+        {
+          "id": "14.1",
+          "text": "Uses `weak.Pointer` or `weak.Make`",
+          "trap": "Without skill, model uses runtime.SetFinalizer instead of weak.Pointer"
+        },
+        {
+          "id": "14.2",
+          "text": "Uses `runtime.AddCleanup` (not SetFinalizer)",
+          "trap": "Without skill, model defaults to the more error-prone SetFinalizer pattern"
+        },
+        {
+          "id": "14.3",
+          "text": "Dead map entries automatically removed",
+          "trap": "none — both approaches can achieve this"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "name": "unsafe.Add-modern",
+      "description": "Read packed binary header using modern unsafe.Add (Go 1.17+)",
+      "prompt": "Write a function `ReadFields(data []byte) (magic uint32, version uint16, length uint32)` in package `proto` that reads a packed binary header. The header layout is: 4 bytes magic, 2 bytes version, 2 bytes padding, 4 bytes length. Use unsafe pointer arithmetic to access each field at its offset. Target Go 1.17+.",
+      "assertions": [
+        {
+          "id": "15.1",
+          "text": "Uses `unsafe.Add` for pointer arithmetic",
+          "trap": "Without skill, model uses old-style uintptr(base) + offset casting"
+        },
+        {
+          "id": "15.2",
+          "text": "No intermediate `uintptr` variable",
+          "trap": "Model might split pointer arithmetic across statements"
+        },
+        {
+          "id": "15.3",
+          "text": "Bounds check before unsafe access",
+          "trap": "none — baseline safety"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "name": "full-slice-expr",
+      "description": "SplitIntoChunks with full-slice expression to prevent append aliasing",
+      "prompt": "Write a function `SplitIntoChunks(data []byte, chunkSize int) [][]byte` in package `chunker`. Split data into chunks of chunkSize bytes (last chunk may be smaller). IMPORTANT: callers will independently append to each returned chunk, so chunks must not share backing arrays — appending to one chunk must never corrupt another.",
+      "assertions": [
+        {
+          "id": "16.1",
+          "text": "Chunks are append-safe (no aliasing)",
+          "trap": "none — both approaches achieve this"
+        },
+        {
+          "id": "16.2",
+          "text": "Uses full-slice expression `[:n:n]`",
+          "trap": "Without skill, model uses make+copy per chunk instead of zero-alloc full-slice"
+        },
+        {
+          "id": "16.3",
+          "text": "Minimal extra allocations (reuses backing array)",
+          "trap": "Without skill, model allocates N fresh arrays instead of reusing original"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "name": "list-valid-use",
+      "description": "OrderedMap with O(1) middle deletion — valid container/list use case",
+      "prompt": "Write an `OrderedMap[K comparable, V any]` in package `ordmap` that preserves insertion order AND supports O(1) deletion by key. Methods: Set(key K, value V), Get(key K) (V, bool), Delete(key K), Keys() []K (in insertion order). When a key is deleted from the middle, the insertion order of remaining keys must be preserved without shifting.",
+      "assertions": [
+        {
+          "id": "17.1",
+          "text": "Uses `container/list` from stdlib",
+          "trap": "Without skill, model builds custom generic linked list instead of using stdlib"
+        },
+        {
+          "id": "17.2",
+          "text": "Map stores `*list.Element` for O(1) access",
+          "trap": "none — both approaches use map for lookup"
+        },
+        {
+          "id": "17.3",
+          "text": "Delete is O(1) via element reference",
+          "trap": "none — both approaches achieve O(1) delete"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "name": "composite-struct-key",
+      "description": "Route cache keyed by (method, path) — struct key vs string encoding",
+      "prompt": "Write an HTTP route cache in package `router`. The cache maps (method, path) pairs to handler names. Implement Set(method, path, handler string) and Get(method, path string) (string, bool). Millions of lookups per second — optimize for zero-allocation lookups.",
+      "assertions": [
+        {
+          "id": "18.1",
+          "text": "Uses struct or array as map key",
+          "trap": "Without skill, model concatenates strings (method+':'+path) or uses complex encoding"
+        },
+        {
+          "id": "18.2",
+          "text": "Zero allocation on lookup path",
+          "trap": "Without skill, model uses string concatenation (allocates) or complex unsafe tricks"
+        },
+        {
+          "id": "18.3",
+          "text": "Simple, readable key type",
+          "trap": "Without skill, model over-engineers with sync.Map + unsafe stack string hacks"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "name": "map-memory-diag",
+      "description": "Maps never shrink — the only fix is rebuilding; GC hints and nil-assignment are insufficient",
+      "prompt": "A Go service processes events. During traffic spikes, `var eventIndex map[string]*Event` grows to 10M entries. After the spike, events expire and are deleted, leaving ~1000 entries. But RSS memory stays at 2GB. The team added `delete(eventIndex, key)` for every expired event — why doesn't memory decrease?\n\nTwo teammates propose fixes:\n- Alice: 'Call `runtime.GC()` after bulk deletes — it will force the GC to reclaim unused map memory.'\n- Bob: 'Set `eventIndex = nil` and then reassign `eventIndex = make(map[string]*Event)` — that releases the old map to the GC.'\n\nAre either of these correct? Write a `Diagnose()` comment and a `Compact()` method on `EventStore` that correctly fixes the issue. Package `events`.",
+      "assertions": [
+        {
+          "id": "19.1",
+          "text": "Correctly diagnoses root cause: Go maps never shrink their bucket array — delete() removes entries but the allocated bucket memory is retained, preventing GC of the backing structure"
+        },
+        {
+          "id": "19.2",
+          "text": "Evaluates Bob's nil-reassign approach: correctly identifies this as valid — setting eventIndex = nil releases the old map to GC, and rebuilding with make creates a fresh small map"
+        },
+        {
+          "id": "19.3",
+          "text": "Evaluates Alice's runtime.GC() approach: correctly identifies this as insufficient alone — GC cannot reclaim a live map's bucket array; the map itself must be rebuilt"
+        },
+        {
+          "id": "19.4",
+          "text": "Compact() creates a fresh map with make and copies surviving entries — rebuilding is the only way to reclaim bucket memory from a Go map"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "name": "ring-round-robin",
+      "description": "LoadBalancer cycling backends using container/ring",
+      "prompt": "Write a `LoadBalancer` in package `lb` that distributes requests across backends using round-robin. NewLoadBalancer(backends []string) *LoadBalancer creates the balancer. Next() string returns the next backend in rotation, cycling forever. The balancer must work correctly even after billions of calls (no integer overflow on counter).",
+      "assertions": [
+        {
+          "id": "20.1",
+          "text": "Uses `container/ring` for round-robin",
+          "trap": "Without skill, model uses atomic counter with modulo (also valid but not stdlib)"
+        },
+        {
+          "id": "20.2",
+          "text": "No integer overflow risk",
+          "trap": "none — both ring (no counter) and uint64 modulo (safe wrap) avoid overflow"
+        },
+        {
+          "id": "20.3",
+          "text": "Correct rotation on each call",
+          "trap": "none — baseline correctness"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "name": "large-struct-ptr",
+      "description": "DocumentStore with 20-field struct — pointer map needed",
+      "prompt": "Write a `DocumentStore` in package `docs`. Document has 20 fields: ID, Title, Author, Body, Summary, Category, Tags []string, CreatedAt, UpdatedAt, PublishedAt time.Time, ViewCount, LikeCount, CommentCount int, Draft bool, Locale, Slug, MetaTitle, MetaDescription, CanonicalURL, RevisionID string. The store is read-heavy (100:1 read:write). Implement Add(doc Document), Get(id string) (*Document, bool), Update(id string, doc Document).",
+      "assertions": [
+        {
+          "id": "21.1",
+          "text": "Uses pointer map `map[string]*Document`",
+          "trap": "Without skill, model uses value map — copies 500+ byte struct on every read"
+        },
+        {
+          "id": "21.2",
+          "text": "Get returns stored pointer (no copy)",
+          "trap": "Without skill, model copies from value map and takes & of copy"
+        },
+        {
+          "id": "21.3",
+          "text": "Uses `sync.RWMutex` for concurrent reads",
+          "trap": "none — baseline concurrency"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "name": "small-struct-val",
+      "description": "CoordTracker with 16-byte Coord — value map preferred over pointer",
+      "prompt": "Write a `CoordTracker` in package `geo`. It tracks millions of active GPS positions. Coord has Lat, Lon float64 (16 bytes total). Implement Update(id string, lat, lon float64), Position(id string) (Coord, bool), Remove(id string). Optimize the internal map for maximum read throughput given the tiny struct size.",
+      "assertions": [
+        {
+          "id": "22.1",
+          "text": "Uses value map `map[string]Coord` (not pointer)",
+          "trap": "Model might over-optimize with pointer map for 'millions' of entries"
+        },
+        {
+          "id": "22.2",
+          "text": "Explains < 128-byte threshold for value vs pointer choice",
+          "trap": "Without skill, model doesn't articulate the size-based tradeoff"
+        },
+        {
+          "id": "22.3",
+          "text": "Proportional complexity for struct size",
+          "trap": "Without skill, model may over-engineer with sharding for a simple case"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "name": "clip-after-delete",
+      "description": "PurgeInactive with slices.DeleteFunc + Clip to release dead references",
+      "prompt": "Write a function `PurgeInactive(users []User) []User` in package `cleanup`. User has ID string, Active bool, and Profile []byte (can be several MB). Remove all inactive users. The returned slice must not hold references to any inactive User's Profile data in its excess capacity. Users are typically 90% inactive after a bulk import.",
+      "assertions": [
+        {
+          "id": "23.1",
+          "text": "No dead references in result slice",
+          "trap": "none — both approaches achieve this"
+        },
+        {
+          "id": "23.2",
+          "text": "Uses `slices.DeleteFunc` + `slices.Clip`",
+          "trap": "Without skill, model uses manual loop + make instead of modern slices package"
+        },
+        {
+          "id": "23.3",
+          "text": "Excess capacity released",
+          "trap": "none — both approaches release excess"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "name": "heap-priority-queue",
+      "description": "Task scheduler using container/heap — tests knowledge of heap.Interface and heap.Fix",
+      "prompt": "Write a `TaskScheduler` in package `scheduler` that executes tasks in priority order. Each Task has ID string, Priority int (lower = higher priority), and ExecuteAt time.Time. Implement Schedule(task Task), Next() (Task, bool), and UpdatePriority(id string, newPriority int). UpdatePriority must efficiently re-order the task without removing and re-adding it.",
+      "assertions": [
+        {
+          "id": "24.1",
+          "text": "Implements heap.Interface (Len, Less, Swap, Push, Pop) on a custom type",
+          "trap": "Without skill, model might use a sorted slice with re-sort on every insert"
+        },
+        {
+          "id": "24.2",
+          "text": "Uses heap.Fix for UpdatePriority (O(log n)) instead of removing and re-adding",
+          "trap": "Without skill, model removes + re-pushes (O(n + log n)) or re-sorts (O(n log n))"
+        },
+        {
+          "id": "24.3",
+          "text": "Maintains an index map (id -> position in heap) for O(1) lookup before Fix",
+          "trap": "Without skill, model linear-scans the heap to find the task by ID"
+        },
+        {
+          "id": "24.4",
+          "text": "Calls heap.Init before first use",
+          "trap": "Model might forget initialization"
+        },
+        {
+          "id": "24.5",
+          "text": "Next() uses heap.Pop (not direct slice access and removal)",
+          "trap": "Model might read [0] and manually remove"
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "name": "growth-independence",
+      "description": "Tests that code does not depend on specific slice growth factor",
+      "prompt": "Write a Go function `EstimateAllocations(n int) int` in package `bench` that returns how many times the backing array will be reallocated when appending n elements one-by-one to an initially empty slice. Your implementation must work correctly on Go 1.20, Go 1.21, and any future Go version.",
+      "assertions": [
+        {
+          "id": "25.1",
+          "text": "Does NOT hardcode a growth factor (e.g., assumes doubling or 1.25x) in the calculation",
+          "trap": "Without skill, model assumes doubling below some threshold and 1.25x above"
+        },
+        {
+          "id": "25.2",
+          "text": "Uses an actual append loop to empirically measure allocations, OR explicitly states the growth algorithm may change between versions",
+          "trap": "Model might implement a formula based on current Go runtime behavior"
+        },
+        {
+          "id": "25.3",
+          "text": "Comments or documents that the slice growth algorithm is an implementation detail not guaranteed by the spec",
+          "trap": "Without skill, model presents the growth formula as a reliable contract"
+        },
+        {
+          "id": "25.4",
+          "text": "Does NOT rely on the 256-element threshold as a stable boundary",
+          "trap": "Model might treat the threshold as a spec guarantee"
+        },
+        {
+          "id": "25.5",
+          "text": "Suggests preallocation as the solution to avoid depending on growth behavior",
+          "trap": "Without skill, model tries to predict growth exactly"
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "name": "array-as-map-key",
+      "description": "Tests when to use arrays (comparable, value type) as map keys vs slices",
+      "prompt": "Write a `PixelCache` in package `imaging` that caches computed color values for pixel coordinates. Coordinates are (x, y) integer pairs. The cache is used in a rendering pipeline processing millions of pixels. Implement Set(x, y int, color uint32) and Get(x, y int) (uint32, bool). Optimize for lookup speed.",
+      "assertions": [
+        {
+          "id": "26.1",
+          "text": "Uses [2]int array or a struct{X,Y int} as the map key (not string encoding or nested maps)",
+          "trap": "Without skill, model might use fmt.Sprintf(\"%d,%d\") or map[int]map[int]uint32"
+        },
+        {
+          "id": "26.2",
+          "text": "Key type is comparable (arrays and all-comparable-field structs satisfy this)",
+          "trap": "Model might try to use a slice as a map key"
+        },
+        {
+          "id": "26.3",
+          "text": "Zero allocation on lookup path (no string formatting)",
+          "trap": "Without skill, model formats a string key per lookup"
+        },
+        {
+          "id": "26.4",
+          "text": "Uses value map (uint32 is 4 bytes — pointer overhead not justified)",
+          "trap": "Model might use *uint32 for no reason"
+        },
+        {
+          "id": "26.5",
+          "text": "Preallocates map if estimated size is available",
+          "trap": "Model might skip preallocation for a hot-path cache"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "name": "bufio-scanner-limit",
+      "description": "Tests knowledge of bufio.Scanner's 64KB default token limit",
+      "prompt": "Write a function `ParseLogFile(r io.Reader) ([]LogEntry, error)` in package `logs`. Each log line is a JSON object. Some log entries contain large base64-encoded payloads and can be up to 2MB per line. Parse all lines and return the entries.",
+      "assertions": [
+        {
+          "id": "27.1",
+          "text": "Uses bufio.Scanner for line-by-line reading",
+          "trap": "Without skill, model might use bufio.NewReader + ReadString or ReadBytes"
+        },
+        {
+          "id": "27.2",
+          "text": "Calls scanner.Buffer() to increase the max token size beyond the 64KB default",
+          "trap": "Without skill, model uses default Scanner which silently truncates or errors on lines > 64KB"
+        },
+        {
+          "id": "27.3",
+          "text": "Sets buffer size to at least 2MB to accommodate the large lines",
+          "trap": "Model might use Scanner without adjusting buffer, failing on large lines"
+        },
+        {
+          "id": "27.4",
+          "text": "Checks scanner.Err() after the scan loop",
+          "trap": "Model might ignore scanner errors"
+        },
+        {
+          "id": "27.5",
+          "text": "Unmarshals each line as JSON into LogEntry struct",
+          "trap": "None — baseline correctness"
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "name": "generics-when-not-to-use",
+      "description": "Tests judgment about when generics are NOT appropriate",
+      "prompt": "Write a Go HTTP response helper package `respond`. It needs: RespondJSON(w, status, data) that marshals any data to JSON, RespondError(w, status, message) that sends an error JSON, and RespondNoContent(w) that sends 204. A teammate suggests making it generic: `Respond[T any](w, status, data T)`. Should you use generics here? Implement the best approach.",
+      "assertions": [
+        {
+          "id": "28.1",
+          "text": "Does NOT make RespondJSON generic with a type parameter (any constraint with json.Marshal makes generics pointless — it's just interface{} with extra syntax)",
+          "trap": "Without skill, model accepts the teammate's generic suggestion"
+        },
+        {
+          "id": "28.2",
+          "text": "Uses `any` or `interface{}` parameter directly for the data argument",
+          "trap": "Model might use generics just because the prompt suggests it"
+        },
+        {
+          "id": "28.3",
+          "text": "Explains WHY generics are not appropriate here (any constraint means no type-specific behavior, json.Marshal already accepts any)",
+          "trap": "Without skill, model adds generics without questioning the value"
+        },
+        {
+          "id": "28.4",
+          "text": "Mentions that generics shine for containers/algorithms where type safety adds value, not for serialization",
+          "trap": "Model might not articulate the distinction"
+        },
+        {
+          "id": "28.5",
+          "text": "Implementation is straightforward without type parameters",
+          "trap": "None — baseline"
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "name": "middleware-log-chain",
+      "prompt": "Write a Go HTTP middleware chain with 3 middlewares: LoggingMiddleware, AuthMiddleware, RateLimitMiddleware. Each wraps the next handler. Each middleware should log what it's doing at each step and propagate errors properly up the chain. The final handler processes a request. Include detailed logging at each layer so we can trace the request flow.",
+      "trap": "\"log at each step\" tempts log+return violations and high-cardinality error messages with interpolated IPs/limits",
+      "assertions": [
+        {
+          "id": "29.1",
+          "text": "Uses slog (not log.Printf)"
+        },
+        {
+          "id": "29.2",
+          "text": "Low-cardinality error messages (no IPs/limits interpolated)"
+        },
+        {
+          "id": "29.3",
+          "text": "Structured error context (oops.With, not in error string)"
+        },
+        {
+          "id": "29.4",
+          "text": "Structured slog key-value log entries"
+        },
+        {
+          "id": "29.5",
+          "text": "Error strings lowercase"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "name": "order-processor",
+      "prompt": "Write a Go function ProcessOrders(ctx context.Context, orders []Order) error that validates and processes each order. Order has ID, UserID, Amount, Currency fields. When validation fails (amount <= 0, empty currency, empty user ID), the error message should clearly indicate which order failed and why, so operators can debug issues in production. Return all errors, not just the first.",
+      "trap": "\"indicate which order failed\" tempts interpolating order IDs into error strings",
+      "assertions": [
+        {
+          "id": "30.1",
+          "text": "Log/APM grouping messages are low-cardinality; IDs and paths are attached as structured attributes rather than baked into the stable log message"
+        },
+        {
+          "id": "30.2",
+          "text": "Variable data as structured attributes (oops/slog)"
+        },
+        {
+          "id": "30.3",
+          "text": "Uses errors.Join to collect all order errors"
+        },
+        {
+          "id": "30.4",
+          "text": "Error strings lowercase"
+        },
+        {
+          "id": "30.5",
+          "text": "Validates ALL fields per order (no short-circuit)"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "name": "batch-csv-importer",
+      "prompt": "Write a Go function ImportCSV(r io.Reader) (int, error) that reads a CSV with columns: name, email, phone. It validates each row (name not empty, email contains '@', phone is digits only). It should return the count of successfully imported rows and a detailed failure report showing every invalid row with its row number and which column failed, so operators can fix the CSV and retry. Process ALL rows even if early ones fail.",
+      "trap": "\"detailed failure report with row numbers\" tempts interpolating row/col into error strings",
+      "assertions": [
+        {
+          "id": "31.1",
+          "text": "Error messages static (no row numbers in error string)"
+        },
+        {
+          "id": "31.2",
+          "text": "Row/column data as structured attributes (oops/slog)"
+        },
+        {
+          "id": "31.3",
+          "text": "Collects all row errors (doesn't stop on first)"
+        },
+        {
+          "id": "31.4",
+          "text": "Error strings lowercase"
+        },
+        {
+          "id": "31.5",
+          "text": "Uses errors.Join for combining errors"
+        }
+      ]
+    },
+    {
+      "id": 32,
+      "name": "wrapped-error-compare",
+      "prompt": "Fix the error handling in this Go code. All errors may be wrapped by middleware before reaching these handlers:\n\n```go\npackage storage\n\nimport (\n    \"database/sql\"\n    \"fmt\"\n    \"net\"\n)\n\nvar ErrNotFound = fmt.Errorf(\"Not Found.\")\nvar ErrConflict = fmt.Errorf(\"Conflict: resource already exists.\")\n\ntype TimeoutError struct {\n    Operation string\n    Duration  int\n}\nfunc (e *TimeoutError) Error() string {\n    return fmt.Sprintf(\"Timeout after %ds on %s.\", e.Duration, e.Operation)\n}\n\nfunc HandleDBError(err error) string {\n    if err == sql.ErrNoRows { return \"not found\" }\n    if err == sql.ErrTxDone { return \"transaction completed\" }\n    if te, ok := err.(*TimeoutError); ok { return fmt.Sprintf(\"timeout on %s\", te.Operation) }\n    if ne, ok := err.(*net.OpError); ok { return fmt.Sprintf(\"network error: %s\", ne.Op) }\n    return \"unknown error\"\n}\n```",
+      "trap": "Pre-existing fmt.Errorf sentinels with capitalization/punctuation + == comparisons + type assertions",
+      "assertions": [
+        {
+          "id": "32.1",
+          "text": "Sentinel errors use errors.New (not fmt.Errorf)"
+        },
+        {
+          "id": "32.2",
+          "text": "Sentinel strings lowercase, no punctuation"
+        },
+        {
+          "id": "32.3",
+          "text": "TimeoutError.Error() lowercase, no punctuation"
+        },
+        {
+          "id": "32.4",
+          "text": "errors.Is for sentinel matching"
+        },
+        {
+          "id": "32.5",
+          "text": "errors.As for type extraction"
+        }
+      ]
+    },
+    {
+      "id": 33,
+      "name": "multi-service-fetch",
+      "prompt": "Write a Go function GetUserDashboard(ctx context.Context, userID string) (*Dashboard, error) that fetches data from 3 microservices: ProfileService.GetProfile(ctx, userID), PreferencesService.GetPreferences(ctx, userID), and ActivityService.GetRecentActivity(ctx, userID, 10). Combine the results into a Dashboard struct. Each service can fail independently.",
+      "trap": "Three service calls tempt bare return err without context or structured attributes",
+      "assertions": [
+        {
+          "id": "33.1",
+          "text": "Errors wrapped with service context"
+        },
+        {
+          "id": "33.2",
+          "text": "Low-cardinality error messages"
+        },
+        {
+          "id": "33.3",
+          "text": "Uses structured attributes (oops/slog)"
+        },
+        {
+          "id": "33.4",
+          "text": "Error strings lowercase"
+        },
+        {
+          "id": "33.5",
+          "text": "Each service identifiable by context prefix"
+        }
+      ]
+    },
+    {
+      "id": 34,
+      "name": "config-validation",
+      "prompt": "Write a Go function ValidateServerConfig(cfg ServerConfig) error. ServerConfig has: Host (string, required), Port (int, 1-65535), TLSCert (string, required if TLSEnabled), TLSKey (string, required if TLSEnabled), TLSEnabled (bool), MaxConns (int, > 0), ReadTimeout (time.Duration, > 0), WriteTimeout (time.Duration, > 0). Validate ALL fields and return a clear error listing every problem found.",
+      "trap": "Many fields tempts early return, custom error type with capitalized field prefixes, or []string instead of errors.Join",
+      "assertions": [
+        {
+          "id": "34.1",
+          "text": "Uses errors.Join for combining validation errors"
+        },
+        {
+          "id": "34.2",
+          "text": "Error strings lowercase"
+        },
+        {
+          "id": "34.3",
+          "text": "Validates ALL fields"
+        },
+        {
+          "id": "34.4",
+          "text": "Conditional TLS validation"
+        },
+        {
+          "id": "34.5",
+          "text": "No panic for validation"
+        }
+      ]
+    },
+    {
+      "id": 35,
+      "name": "modernize-logging",
+      "prompt": "Modernize the logging in this Go code. Keep all the logging but make it production-ready:\n\n```go\npackage worker\n\nimport (\n    \"fmt\"\n    \"log\"\n    \"time\"\n)\n\nfunc ProcessJob(jobID string, payload []byte) error {\n    log.Printf(\"INFO: Starting job %s with %d bytes payload\", jobID, len(payload))\n    start := time.Now()\n    result, err := executeJob(jobID, payload)\n    if err != nil {\n        log.Printf(\"ERROR: Job %s failed after %v: %v\", jobID, time.Since(start), err)\n        return fmt.Errorf(\"processing job %s: %w\", jobID, err)\n    }\n    if result.Warnings > 0 {\n        log.Printf(\"WARNING: Job %s completed with %d warnings\", jobID, result.Warnings)\n    }\n    log.Printf(\"INFO: Job %s completed in %v, processed %d items\", jobID, time.Since(start), result.ItemCount)\n    return nil\n}\n```\n\nA teammate reviewing your modernization says: 'Good, but you removed the error log — when executeJob fails, nothing gets logged. The caller might just propagate the error up the chain and it could get swallowed. We MUST log the error here so it's visible in production.'",
+      "trap": "The teammate's argument sounds reasonable — callers might swallow errors. The skill teaches that each error must be handled once: either log it OR return it, never both. If every function logs-and-returns, the same error gets logged multiple times at every layer, making logs noisy and hard to correlate. The model should push back on the teammate and keep only the return.",
+      "assertions": [
+        {
+          "id": "35.1",
+          "text": "Does not log AND return the same error — the modernized code must choose: either log (and not return) or return (and not log). Both is the anti-pattern."
+        },
+        {
+          "id": "35.2",
+          "text": "Pushes back on the teammate's suggestion or explains why logging AND returning creates duplicate log entries at every layer"
+        },
+        {
+          "id": "35.3",
+          "text": "Uses slog (not log.Printf) with structured key-value attributes"
+        },
+        {
+          "id": "35.4",
+          "text": "Moves jobID and other variable data to structured slog attributes, not string interpolation"
+        },
+        {
+          "id": "35.5",
+          "text": "Low-cardinality log messages — log messages are static strings, variable data is in attributes"
+        }
+      ]
+    },
+    {
+      "id": 36,
+      "name": "graceful-shutdown",
+      "prompt": "Write a Go Application struct with: HTTPServer (*http.Server), DB (*sql.DB), Cache (redis.Client), MessageQueue (amqp.Connection), MetricsServer (*http.Server). Implement GracefulShutdown(ctx context.Context) error that closes ALL of them. Each must be attempted regardless of others failing. Shutdown order: HTTP first, then MQ, then DB+Cache, then Metrics last.",
+      "trap": "5 resources tempts bare append without wrapping context on each error",
+      "assertions": [
+        {
+          "id": "36.1",
+          "text": "Uses errors.Join"
+        },
+        {
+          "id": "36.2",
+          "text": "Each error wrapped with resource context"
+        },
+        {
+          "id": "36.3",
+          "text": "Error strings lowercase"
+        },
+        {
+          "id": "36.4",
+          "text": "Attempts ALL resources even if earlier fail"
+        },
+        {
+          "id": "36.5",
+          "text": "Correct shutdown order"
+        }
+      ]
+    },
+    {
+      "id": 37,
+      "name": "todo-CRUD-repo",
+      "prompt": "Write a Go TodoRepository backed by *sql.DB with full CRUD: Create(ctx, *Todo) error, GetByID(ctx, id string) (*Todo, error), List(ctx, userID string) ([]*Todo, error), Update(ctx, *Todo) error, Delete(ctx, id string) error. Todo has ID, UserID, Title, Done, CreatedAt fields. Make it production-ready with proper error handling.",
+      "trap": "Full CRUD with IDs tempts interpolating todo_id and user_id into error strings",
+      "assertions": [
+        {
+          "id": "37.1",
+          "text": "Low-cardinality error messages (no ID interpolation)"
+        },
+        {
+          "id": "37.2",
+          "text": "Errors wrapped with method context"
+        },
+        {
+          "id": "37.3",
+          "text": "Uses errors.Is for sql.ErrNoRows"
+        },
+        {
+          "id": "37.4",
+          "text": "Sentinel as package-level var"
+        },
+        {
+          "id": "37.5",
+          "text": "Error strings lowercase"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "name": "retry-handler",
+      "prompt": "Write a Go function WithRetry(ctx context.Context, name string, maxAttempts int, fn func() error) error that retries fn up to maxAttempts times with exponential backoff (starting at 100ms, doubling each time). Log each retry attempt with the attempt number, delay, and error. On final failure, return the last error wrapped with context. Include the operation name and attempt info in logs so operators can diagnose intermittent failures.",
+      "trap": "\"log each retry attempt\" tempts logging inside the retry loop AND returning the final error (log+return)",
+      "assertions": [
+        {
+          "id": "38.1",
+          "text": "Does not log AND return final error (single handling rule)"
+        },
+        {
+          "id": "38.2",
+          "text": "Structured slog attributes"
+        },
+        {
+          "id": "38.3",
+          "text": "Uses slog (not log.Printf)"
+        },
+        {
+          "id": "38.4",
+          "text": "Low-cardinality log messages"
+        },
+        {
+          "id": "38.5",
+          "text": "Wraps final error with context"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "name": "event-processor",
+      "prompt": "Write a Go function ProcessEvents(ctx context.Context, events []Event) error that processes a batch of events. Event has ID, Type (string: \"user.created\", \"order.placed\", \"payment.failed\", etc.), Payload json.RawMessage, and Timestamp time.Time. Each event type dispatches to a different handler. When processing fails, the error should include the event type, ID, and timestamp so operators can identify which event failed. Collect all errors and return them.",
+      "trap": "\"include event type, ID, and timestamp\" tempts interpolating event details into error strings",
+      "assertions": [
+        {
+          "id": "39.1",
+          "text": "Error messages static (event type/ID not in error string)"
+        },
+        {
+          "id": "39.2",
+          "text": "Event details as structured attributes (oops/slog)"
+        },
+        {
+          "id": "39.3",
+          "text": "Uses errors.Join to collect all event errors"
+        },
+        {
+          "id": "39.4",
+          "text": "Error strings lowercase"
+        },
+        {
+          "id": "39.5",
+          "text": "No logging inside processor (returns to caller)"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "name": "api-gateway",
+      "prompt": "Write a Go API gateway package that proxies requests to a backend UserService. The gateway has a public GetUser(ctx, id) (*User, error) function. The backend UserService returns its own internal error types: *BackendTimeoutError (with Endpoint, Duration fields), *BackendNotFoundError (with Resource, ID fields), and generic errors.\n\nThe gateway must translate backend errors to clean public domain errors. A security-minded teammate reviewing the design says: 'Make sure you use fmt.Errorf with %w when wrapping backend errors — that way callers can use errors.As to inspect details if they need to debug. We should preserve the full error chain for observability.'\n\nIs the teammate's suggestion correct? Implement the gateway correctly.",
+      "trap": "The teammate's argument sounds compelling — preserving the error chain for observability is a real concern. But %w at an API boundary leaks internal implementation details: callers can use errors.As to inspect *BackendTimeoutError or *BackendNotFoundError, creating a hidden coupling to backend internals. The correct approach: use errors.As internally to extract details, translate to domain errors, and use %v (not %w) so the chain is broken at the boundary.",
+      "assertions": [
+        {
+          "id": "40.1",
+          "text": "Rejects the teammate's %w suggestion — using %w at the gateway boundary lets callers unwrap to backend-internal types via errors.As, creating hidden coupling to implementation details"
+        },
+        {
+          "id": "40.2",
+          "text": "Uses %v (not %w) when constructing the translated domain errors — this breaks the error chain at the boundary"
+        },
+        {
+          "id": "40.3",
+          "text": "Uses errors.As internally within the gateway to inspect backend error types before translating"
+        },
+        {
+          "id": "40.4",
+          "text": "Backend types (*BackendTimeoutError, *BackendNotFoundError) are not accessible via errors.As from callers of the gateway"
+        },
+        {
+          "id": "40.5",
+          "text": "Translates to clean public domain sentinels (ErrNotFound, ErrTimeout, ErrServiceUnavailable) with lowercase error strings"
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "name": "typed-nil-error-interface-trap",
+      "description": "Returns untyped nil on success, not typed *ConfigError nil pointer through error interface",
+      "prompt": "In package `validator`, write a function `Validate(cfg Config) error` where Config has fields `Host string` and `Port int`. The function should check if Host is empty or Port is out of range (1-65535). Use a local `*ConfigError` variable to accumulate the first error found, then return it at the end. ConfigError is a struct with a `Field string` and an `Error() string` method.\n\nWrite the full code including the Config struct, ConfigError struct with its Error method, and the Validate function.",
+      "trap": "Model declares `var configErr *ConfigError` and returns it directly — `return configErr` wraps a typed nil pointer in the error interface, making the returned error non-nil even when configErr is nil",
+      "assertions": [
+        {
+          "id": "41.1",
+          "text": "Returns untyped nil on valid config — the success path must use `return nil` (not `return configErr` where configErr is *ConfigError), because a typed nil pointer wrapped in an error interface is non-nil"
+        },
+        {
+          "id": "41.2",
+          "text": "No typed nil pointer leaked through the error interface — `var configErr *ConfigError` followed by `return configErr` creates an interface{type: *ConfigError, value: nil} which is != nil"
+        },
+        {
+          "id": "41.3",
+          "text": "ConfigError.Error() returns a useful message including the Field name"
+        },
+        {
+          "id": "41.4",
+          "text": "Validates both Host and Port conditions independently, not short-circuiting on first error if using accumulation pattern"
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "name": "prevent-slice-aliasing-append",
+      "description": "Append-safe function prevents corrupting caller's backing array",
+      "prompt": "In package `sliceutil`, write a function `AddDefaults(base []string, defaults []string) []string` that appends any items from `defaults` that aren't already in `base`, and returns the extended slice. Keep it simple — just use append.",
+      "trap": "Model uses `base = append(base, v)` directly — if base has excess capacity, append writes into the caller's backing array without allocating, silently mutating data the caller still references",
+      "assertions": [
+        {
+          "id": "42.1",
+          "text": "Does not modify caller's input slice — `base = append(base, v)` silently corrupts the caller's backing array if capacity allows; must create a new slice first"
+        },
+        {
+          "id": "42.2",
+          "text": "Uses full-slice expression `base[:len(base):len(base)]`, `slices.Clone(base)`, or `copy` to prevent aliasing before appending new elements"
+        },
+        {
+          "id": "42.3",
+          "text": "Correctly checks membership — only appends items from defaults that are not already present in base"
+        },
+        {
+          "id": "42.4",
+          "text": "Does not modify the defaults slice either — both inputs are treated as read-only"
+        }
+      ]
+    },
+    {
+      "id": 43,
+      "name": "defensive-copies-for-collection-getters",
+      "description": "Collection getters return defensive copies via slices.Clone/maps.Clone",
+      "prompt": "In package `user`, write a struct `UserProfile` with fields `Name string`, `Email string`, `Permissions []string`, and `Metadata map[string]string`. Add getter methods `GetPermissions() []string` and `GetMetadata() map[string]string`. Keep it simple.",
+      "trap": "Model returns direct references to internal slice and map fields, letting callers mutate the struct's internal state without going through any setter",
+      "assertions": [
+        {
+          "id": "43.1",
+          "text": "Collection fields (Permissions/Metadata) are unexported — exported slice/map fields let any caller mutate struct internals directly, bypassing any getters"
+        },
+        {
+          "id": "43.2",
+          "text": "GetPermissions returns a defensive copy (slices.Clone, make+copy, or append to nil) — not the internal slice reference"
+        },
+        {
+          "id": "43.3",
+          "text": "GetMetadata returns a defensive copy (maps.Clone or manual loop copy) — not the internal map reference"
+        },
+        {
+          "id": "43.4",
+          "text": "Scalar fields (Name, Email) can remain exported since strings are immutable in Go"
+        },
+        {
+          "id": "43.5",
+          "text": "Handles nil internal fields gracefully — GetPermissions on a zero-value UserProfile should not panic"
+        }
+      ]
+    },
+    {
+      "id": 44,
+      "name": "defer-in-loop-helper-function",
+      "description": "Loop body extracted to helper so defer closes each connection per iteration",
+      "prompt": "In package `db`, write a function `PingAll(hosts []string) (string, error)` that tries to connect to each database host in order. For each host, call `sql.Open(\"postgres\", host)` then `db.Ping()`. Return the first host that responds successfully. Use `defer db.Close()` after each Open to clean up. If no host responds, return an error.",
+      "trap": "Model puts `defer db.Close()` inside the for loop — defers accumulate until the outer function returns, keeping all connections open simultaneously instead of closing each one after its Ping",
+      "assertions": [
+        {
+          "id": "44.1",
+          "text": "No bare `defer` in loop body — `defer db.Close()` inside a `for` loop defers ALL closes until function exit, keeping all connections open simultaneously"
+        },
+        {
+          "id": "44.2",
+          "text": "Extracts loop body to a helper function (or uses IIFE) so that defer runs once per iteration, closing each connection before opening the next"
+        },
+        {
+          "id": "44.3",
+          "text": "Checks error from sql.Open before proceeding to Ping"
+        },
+        {
+          "id": "44.4",
+          "text": "Returns meaningful error when no host responds — not just empty string"
+        }
+      ]
+    },
+    {
+      "id": 45,
+      "name": "bounds-check-before-narrowing-int64-to-uint32",
+      "description": "Validates contentLength fits in uint32 before conversion to prevent silent truncation",
+      "prompt": "In package `protocol`, write a function `WriteHeader(w io.Writer, contentLength int64) error` that writes a 4-byte binary header using `binary.BigEndian.PutUint32`. The header contains the content length as a uint32. Write the header bytes to `w`.",
+      "trap": "Model uses `uint32(contentLength)` directly — values above math.MaxUint32 or negative values silently truncate to wrong results without any error",
+      "assertions": [
+        {
+          "id": "45.1",
+          "text": "Bounds-checks before narrowing int64 to uint32 — `uint32(contentLength)` silently truncates values > math.MaxUint32 or < 0"
+        },
+        {
+          "id": "45.2",
+          "text": "Returns error for out-of-range values instead of silently truncating"
+        },
+        {
+          "id": "45.3",
+          "text": "Checks for negative contentLength — negative values wrap to large uint32 values"
+        },
+        {
+          "id": "45.4",
+          "text": "Uses math.MaxUint32 for the upper bound check"
+        }
+      ]
+    },
+    {
+      "id": 46,
+      "name": "copy-subslice-release-backing-array",
+      "description": "Returns copy of token bytes instead of raw subslice retaining large backing array",
+      "prompt": "In package `parser`, write a function `ExtractToken(response []byte) []byte` that returns the first 32 bytes of the response, which contain the authentication token. Keep it simple — one line is enough.",
+      "trap": "Model returns `response[:32]` — this subslice shares the backing array with the full response, preventing GC of potentially megabytes of data for the lifetime of the 32-byte token",
+      "assertions": [
+        {
+          "id": "46.1",
+          "text": "Does not return raw subslice of input — `response[:32]` retains the entire backing array in memory, preventing GC of potentially megabytes of data"
+        },
+        {
+          "id": "46.2",
+          "text": "Uses slices.Clone, make+copy, or append([]byte(nil), ...) to release the backing array"
+        },
+        {
+          "id": "46.3",
+          "text": "Handles the case where response might be shorter than 32 bytes — should check len(response) >= 32 or document the precondition"
+        },
+        {
+          "id": "46.4",
+          "text": "Result is independent of input — modifying the returned token should not affect the original response"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "name": "comma-ok-type-assertion-not-bare",
+      "description": "Uses comma-ok type assertions or type switch, not bare panicking assertions",
+      "prompt": "In package `dispatch`, write a function `ProcessMessage(msg any) string` that handles messages. If msg is a string, return it uppercased. If msg is an int, return its string representation. If msg is []byte, return it as a string. Be concise — use direct type assertions, not a switch.",
+      "trap": "Model follows the prompt's 'direct type assertions' instruction and uses bare `v := msg.(string)`, which panics at runtime when msg is not the expected type",
+      "assertions": [
+        {
+          "id": "47.1",
+          "text": "Uses comma-ok form `v, ok := msg.(T)` or type switch — not bare assertion `v := msg.(T)` which panics on type mismatch"
+        },
+        {
+          "id": "47.2",
+          "text": "Handles unknown types without panic (returns empty string or error for unrecognized types)"
+        },
+        {
+          "id": "47.3",
+          "text": "Uses strings.ToUpper for string uppercasing, not manual byte manipulation"
+        },
+        {
+          "id": "47.4",
+          "text": "Uses strconv.Itoa or fmt.Sprintf for int-to-string conversion"
+        }
+      ]
+    },
+    {
+      "id": 48,
+      "name": "nil-func-check-before-call",
+      "description": "Checks callback for nil before calling to prevent runtime panic",
+      "prompt": "In package `worker`, write a struct `Task` with fields `Name string` and `OnComplete func(result string)`. Add a `Run()` method that simulates work by setting `result := \"done: \" + t.Name`, then calls `t.OnComplete(result)` to notify completion.",
+      "trap": "Model calls `t.OnComplete(result)` without nil check — calling a nil func panics at runtime when OnComplete was never set",
+      "assertions": [
+        {
+          "id": "48.1",
+          "text": "Checks OnComplete for nil before calling — `t.OnComplete(result)` panics at runtime if OnComplete was never set"
+        },
+        {
+          "id": "48.2",
+          "text": "Task is usable without setting OnComplete — `Task{Name: \"foo\"}.Run()` should not panic"
+        },
+        {
+          "id": "48.3",
+          "text": "Result string is computed before the nil check — work simulation completes regardless of callback presence"
+        },
+        {
+          "id": "48.4",
+          "text": "Method uses pointer receiver `(t *Task)` for consistency with mutable struct patterns"
+        }
+      ]
+    },
+    {
+      "id": 49,
+      "name": "initialize-map-before-write",
+      "description": "Constructor or Handle method initializes routes map before writing to prevent panic",
+      "prompt": "In package `router`, write a struct `Router` with fields `prefix string` and `routes map[string]http.HandlerFunc`. Add a constructor `NewRouter(prefix string) *Router` and a method `Handle(path string, handler http.HandlerFunc)` that stores the handler. Keep the constructor minimal — just set the prefix.",
+      "trap": "Model follows the prompt's 'keep the constructor minimal' instruction, creating Router with a nil map, and Handle() panics on first call when writing to a nil map",
+      "assertions": [
+        {
+          "id": "49.1",
+          "text": "Map initialized before write — either in the constructor or via lazy-init in Handle; writing to a nil map panics"
+        },
+        {
+          "id": "49.2",
+          "text": "Router is usable immediately after NewRouter — Handle() must not panic on first call"
+        },
+        {
+          "id": "49.3",
+          "text": "Handle stores the handler with the correct key (path or prefix+path)"
+        },
+        {
+          "id": "49.4",
+          "text": "Constructor returns a pointer to Router, not a value copy"
+        }
+      ]
+    },
+    {
+      "id": 50,
+      "name": "epsilon-comparison-not-float-equality",
+      "description": "Uses epsilon comparison instead of == for floating-point values",
+      "prompt": "In package `pricing`, write a function `IsDiscountApplied(originalPrice, finalPrice, discountPercent float64) bool` that returns true if the final price equals the original price with the discount applied. The expected final price is `originalPrice * (1 - discountPercent/100)`. Just compare and return the result.",
+      "trap": "Model uses == to compare computed float64 values — IEEE 754 arithmetic is not exact, so computed results that should be equal often differ by small fractions",
+      "assertions": [
+        {
+          "id": "50.1",
+          "text": "Uses epsilon comparison (math.Abs(a-b) < epsilon), not == — IEEE 754 arithmetic is not exact for runtime float64 values"
+        },
+        {
+          "id": "50.2",
+          "text": "Epsilon value is reasonable (1e-9 for general precision, or 0.01 for cent-level financial precision)"
+        },
+        {
+          "id": "50.3",
+          "text": "Formula correctly computes expected as `originalPrice * (1 - discountPercent/100)`"
+        },
+        {
+          "id": "50.4",
+          "text": "Handles edge cases: zero discount, 100% discount, zero original price"
+        }
+      ]
+    },
+    {
+      "id": 51,
+      "name": "defensive-map-copy-not-reference",
+      "description": "All() returns defensive copy of internal map, not a direct reference",
+      "prompt": "In package `cache`, write a struct `Cache` with an internal `data map[string]string`. Add methods: `Set(key, value string)`, `Get(key string) (string, bool)`, and `All() map[string]string` that returns all cache entries. Include a constructor `New() *Cache`.",
+      "trap": "Model returns c.data directly from All() — callers receive a reference to the internal map and can write to it, bypassing Set() and corrupting cache invariants",
+      "assertions": [
+        {
+          "id": "51.1",
+          "text": "All() returns defensive copy of internal map — using maps.Clone or manual loop copy, not the internal map reference"
+        },
+        {
+          "id": "51.2",
+          "text": "Constructor initializes the data map with make()"
+        },
+        {
+          "id": "51.3",
+          "text": "Get uses comma-ok idiom `v, ok := c.data[key]`"
+        },
+        {
+          "id": "51.4",
+          "text": "Callers cannot modify cache contents through the map returned by All()"
+        }
+      ]
+    },
+    {
+      "id": 52,
+      "name": "closed-channel-handling-fan-in",
+      "description": "Correctly handles closed input channels without blocking forever on receive",
+      "prompt": "In package `pipeline`, write a function `FanIn(channels ...<-chan int) <-chan int` that merges all input channels into a single output channel using a select statement inside a loop. When a channel is closed, stop reading from it. Close the output channel when all inputs are done.",
+      "trap": "Model reads from closed channels without ok-check — a closed channel always succeeds immediately with the zero value, causing the loop to spin infinitely",
+      "assertions": [
+        {
+          "id": "52.1",
+          "text": "Handles closed channels without blocking — uses ok check on receive, nil-channel technique in select, or per-channel goroutines with WaitGroup"
+        },
+        {
+          "id": "52.2",
+          "text": "Output channel is closed exactly once when all inputs are exhausted"
+        },
+        {
+          "id": "52.3",
+          "text": "Does not leak goroutines — every launched goroutine terminates when inputs close"
+        },
+        {
+          "id": "52.4",
+          "text": "Handles nil input channels gracefully — a nil channel in the variadic args should not cause a deadlock"
+        }
+      ]
+    },
+    {
+      "id": 53,
+      "name": "named-return-typed-nil-trap",
+      "description": "Named error return not unconditionally assigned *ParseError to avoid nil interface trap",
+      "prompt": "In package `parser`, write a struct `ParseError` with `Line int` and `Msg string` fields, and an `Error() string` method. Write a `Parser` struct with a `Parse(input string) (*Result, *ParseError)` method that returns a ParseError if input is empty. Then write a standalone function `TryParse(p *Parser, input string) (*Result, error)` that wraps Parse and returns the result. Result is a struct with `Value string`. Use named returns `(result *Result, err error)` and a single return at the end.",
+      "trap": "Model unconditionally assigns `err = parseErr` in TryParse — when Parse returns nil *ParseError, this wraps a typed nil pointer in the error interface, making the returned error non-nil",
+      "assertions": [
+        {
+          "id": "53.1",
+          "text": "No typed nil leaked through named error return — must use conditional assignment (`if parseErr != nil { err = parseErr }`) rather than unconditional `err = parseErr` which wraps nil *ParseError into a non-nil error interface"
+        },
+        {
+          "id": "53.2",
+          "text": "Named return `err` starts as untyped nil and is only set when parseErr is actually non-nil"
+        },
+        {
+          "id": "53.3",
+          "text": "ParseError.Error() includes the Line number in the message for debugging"
+        },
+        {
+          "id": "53.4",
+          "text": "Parser.Parse returns nil *ParseError on success, not an empty ParseError{}"
+        }
+      ]
+    },
+    {
+      "id": 54,
+      "name": "nil-pointer-receiver-guard",
+      "description": "Guards against nil *Notifier before calling methods that dereference the receiver",
+      "prompt": "In package `notify`, write a struct `Notifier` with a `webhook string` field. Add a `Send(msg string) error` method that formats and would send the message (just return nil for now). Then write a function `NotifyAll(n *Notifier, messages []string) error` that sends each message using n.Send. Return the first error.",
+      "trap": "Model calls n.Send without checking n == nil — calling a method on a nil pointer panics when the method accesses n.webhook",
+      "assertions": [
+        {
+          "id": "54.1",
+          "text": "Handles nil *Notifier without panic — either NotifyAll checks `n == nil` before calling, or Send guards `if n == nil` before accessing n.webhook"
+        },
+        {
+          "id": "54.2",
+          "text": "Returns a meaningful error when Notifier is nil, not just silently succeeds"
+        },
+        {
+          "id": "54.3",
+          "text": "NotifyAll iterates all messages and returns on first error"
+        },
+        {
+          "id": "54.4",
+          "text": "Send method uses the webhook field in a way that would dereference the receiver (accessing n.webhook)"
+        }
+      ]
+    },
+    {
+      "id": 55,
+      "name": "defensive-slice-copy-getter",
+      "description": "Items() returns defensive copy of internal slice, not a shared reference",
+      "prompt": "In package `inventory`, write a struct `Inventory` with a `items []string` field. Add methods `Add(item string)` and `Items() []string` that returns the items. Keep it simple.",
+      "trap": "Model returns `inv.items` directly from Items() — callers can append to the returned slice and corrupt the Inventory's internal state through shared backing array",
+      "assertions": [
+        {
+          "id": "55.1",
+          "text": "Items() returns defensive copy — `return inv.items` lets callers mutate the internal slice; must use slices.Clone, make+copy, or append to nil"
+        },
+        {
+          "id": "55.2",
+          "text": "Add method uses append correctly to grow the internal slice"
+        },
+        {
+          "id": "55.3",
+          "text": "Modifying the returned slice from Items() does not affect the Inventory's internal state"
+        },
+        {
+          "id": "55.4",
+          "text": "Field is unexported (`items` not `Items`) — exported field would bypass the getter entirely"
+        }
+      ]
+    },
+    {
+      "id": 56,
+      "name": "sorted-map-keys-deterministic-output",
+      "description": "Sorts map keys before iterating for deterministic output",
+      "prompt": "In package `httputil`, write a function `HeaderString(headers map[string]string) string` that formats HTTP headers as \"Key: Value\\r\\n\" lines concatenated together. Keep it simple — just range over the map.",
+      "trap": "Model follows the prompt's 'just range over the map' instruction — Go map iteration is intentionally randomized, producing different header ordering on each run",
+      "assertions": [
+        {
+          "id": "56.1",
+          "text": "Sorts keys before iteration for deterministic output — map iteration order is randomized by the Go runtime; output changes between runs"
+        },
+        {
+          "id": "56.2",
+          "text": "Uses slices.Sorted(maps.Keys(headers)) or sort.Strings for key sorting"
+        },
+        {
+          "id": "56.3",
+          "text": "Uses strings.Builder for efficient concatenation instead of += in a loop"
+        },
+        {
+          "id": "56.4",
+          "text": "Each header line ends with \\r\\n as specified"
+        }
+      ]
+    },
+    {
+      "id": 57,
+      "name": "nan-propagation-float-division",
+      "description": "NaN from float division propagates silently through computations — not a panic, a silent bug",
+      "prompt": "In package `monitor`, write a function `Threshold(baseRate, currentRate float64) bool` that returns true if `currentRate` is at least 90% of `baseRate`. Formula: `currentRate / baseRate >= 0.9`. This is called to decide whether to trigger an alert — if it returns false, we page the on-call team.",
+      "trap": "Model guards against integer division panic but ignores the float case. When baseRate is 0.0, `currentRate / 0.0` can produce +Inf, -Inf, or NaN depending on currentRate; NaN comparisons always return false. The model may not check for zero because float division doesn't panic.",
+      "assertions": [
+        {
+          "id": "57.1",
+          "text": "Guards against zero baseRate — float division by zero produces +Inf, -Inf, or NaN, not a panic. In particular, 0.0/0.0 is NaN and comparisons with NaN are always false"
+        },
+        {
+          "id": "57.2",
+          "text": "Returns a defined value (true or false with documented semantics) when baseRate is 0, not NaN or +Inf silently propagating"
+        },
+        {
+          "id": "57.3",
+          "text": "Does not rely on the caller to ensure baseRate is non-zero — the function itself is defensive"
+        },
+        {
+          "id": "57.4",
+          "text": "Comparison uses the correct threshold (>= 0.9) for the 90% check"
+        }
+      ]
+    },
+    {
+      "id": 58,
+      "name": "defer-body-close-in-loop",
+      "description": "HTTP response bodies closed per-iteration via helper, not deferred to function exit",
+      "prompt": "In package `fetcher`, write a function `FetchAll(urls []string) ([][]byte, error)` that fetches each URL with http.Get, reads the response body with io.ReadAll, and collects results. Use `defer resp.Body.Close()` after each Get. Return the first error encountered, or all results on success.",
+      "trap": "Model puts `defer resp.Body.Close()` inside the for loop — all response bodies accumulate and are only closed when FetchAll returns, exhausting connections and memory for long URL lists",
+      "assertions": [
+        {
+          "id": "58.1",
+          "text": "No bare defer in loop body — `defer resp.Body.Close()` inside a for loop keeps all response bodies open until the function returns"
+        },
+        {
+          "id": "58.2",
+          "text": "Extracts loop body to helper function (or uses IIFE) so defer fires per iteration"
+        },
+        {
+          "id": "58.3",
+          "text": "Checks resp.StatusCode or at least the error from http.Get"
+        },
+        {
+          "id": "58.4",
+          "text": "Preallocates results slice with `make([][]byte, 0, len(urls))`"
+        }
+      ]
+    },
+    {
+      "id": 59,
+      "name": "zero-value-design-usable-without-constructor",
+      "description": "Types should be usable at zero value; map fields that are written to cannot be nil",
+      "prompt": "In package `registry`, write a struct `Registry` with a `handlers map[string]http.HandlerFunc` field and a `Register(name string, h http.HandlerFunc)` method. A teammate says: 'We don't need a constructor — the zero value should just work. Users can do `var r registry.Registry` and call Register immediately.'\n\nImplement Registry following the teammate's suggestion. The zero value must be usable.",
+      "trap": "Model follows the teammate's suggestion literally and writes `type Registry struct { handlers map[string]http.HandlerFunc }` with `func (r *Registry) Register(...)  { r.handlers[name] = h }` — writing to a nil map panics. The teammate is right that zero values should work, but the implementation needs lazy init. The model must recognize that a nil map panics on write and add lazy init inside Register.",
+      "assertions": [
+        {
+          "id": "59.1",
+          "text": "Register does NOT panic when called on a zero-value Registry — `var r Registry; r.Register(\"x\", h)` must work without calling a constructor first"
+        },
+        {
+          "id": "59.2",
+          "text": "Uses lazy initialization inside Register: `if r.handlers == nil { r.handlers = make(map[string]http.HandlerFunc) }` — writing to nil map panics; lazy init is the idiomatic pattern for zero-value-safe types"
+        },
+        {
+          "id": "59.3",
+          "text": "Does NOT require users to call a constructor — the design follows the teammate's suggestion that the zero value is usable"
+        },
+        {
+          "id": "59.4",
+          "text": "Confirms the teammate's goal is valid: sync.Mutex and bytes.Buffer are examples of zero-value-usable types in the stdlib"
+        }
+      ]
+    },
+    {
+      "id": 60,
+      "name": "bounds-check-before-narrowing-int-to-byte",
+      "description": "Validates age fits in byte range (0-255) before converting to prevent silent truncation",
+      "prompt": "In package `protocol`, write a function `PackAge(age int) byte` that converts a user's age to a single byte for a compact binary protocol. Keep it simple.",
+      "trap": "Model uses `byte(age)` directly — age 256 silently becomes 0, age -1 becomes 255, making the binary protocol produce subtly wrong data without any indication",
+      "assertions": [
+        {
+          "id": "60.1",
+          "text": "Validates age fits in byte range (0-255) — `byte(age)` silently truncates values outside 0-255 (e.g., age 256 becomes 0, age -1 becomes 255)"
+        },
+        {
+          "id": "60.2",
+          "text": "Returns error or panics for out-of-range values instead of silently truncating"
+        },
+        {
+          "id": "60.3",
+          "text": "May change signature to `(byte, error)` to signal validation failure"
+        },
+        {
+          "id": "60.4",
+          "text": "Handles negative ages explicitly — negative values wrap to high byte values"
+        }
+      ]
+    },
+    {
+      "id": 61,
+      "name": "copy-both-subslice-branches",
+      "description": "Both found and not-found paths return independent copies of the subslice",
+      "prompt": "In package `search`, write a function `ExtractBefore(buf []byte, marker byte) []byte` that returns everything in buf before the first occurrence of marker. Use bytes.IndexByte. If marker not found, return the full buf.",
+      "trap": "Model copies the found-marker case but returns the full buf directly for not-found, retaining the full backing array for either return value",
+      "assertions": [
+        {
+          "id": "61.1",
+          "text": "Returns copy, not subslice retaining backing array — `buf[:i]` keeps the entire potentially-large backing array alive in memory"
+        },
+        {
+          "id": "61.2",
+          "text": "Uses slices.Clone, make+copy, or append([]byte(nil), ...) to create independent copy"
+        },
+        {
+          "id": "61.3",
+          "text": "Both the found-marker path and the not-found fallback path return copies"
+        },
+        {
+          "id": "61.4",
+          "text": "Uses bytes.IndexByte as specified"
+        }
+      ]
+    },
+    {
+      "id": 62,
+      "name": "nil-check-all-func-fields",
+      "description": "Both OnRequest and OnResponse checked for nil before calling",
+      "prompt": "In package `http`, write a struct `Client` with fields `OnRequest func(url string)` and `OnResponse func(status int)`. Add a `Fetch(url string) (int, error)` method that calls OnRequest before fetching, does the fetch (simulate with status 200), and calls OnResponse after. Keep it simple.",
+      "trap": "Model guards OnRequest but forgets OnResponse, or neither — calling a nil func panics at runtime for any callback that was never set",
+      "assertions": [
+        {
+          "id": "62.1",
+          "text": "Checks OnRequest for nil before calling — calling a nil func panics at runtime"
+        },
+        {
+          "id": "62.2",
+          "text": "Checks OnResponse for nil before calling — same nil func panic risk"
+        },
+        {
+          "id": "62.3",
+          "text": "Client is usable with zero-value callbacks — `Client{}.Fetch(url)` should not panic"
+        },
+        {
+          "id": "62.4",
+          "text": "Both hooks are optional — fetch completes successfully even when neither is set"
+        }
+      ]
+    },
+    {
+      "id": 63,
+      "name": "epsilon-comparison-financial",
+      "description": "Uses epsilon comparison for float equality in billing reconciliation",
+      "prompt": "In package `billing`, write a function `ChargesMatch(computed, invoiced float64) bool` that returns true if the computed charges match the invoiced amount. This is used to reconcile billing — the amounts should be equal.",
+      "trap": "Model uses `computed == invoiced` for float comparison — floating-point arithmetic accumulates tiny errors, making amounts computed via different paths fail equality even when they represent the same value",
+      "assertions": [
+        {
+          "id": "63.1",
+          "text": "Uses epsilon comparison (math.Abs(a-b) < epsilon), not == — floating-point arithmetic can produce values that differ by tiny fractions"
+        },
+        {
+          "id": "63.2",
+          "text": "Epsilon is reasonable for financial contexts (1e-2 for cent precision or 1e-9 for general precision)"
+        },
+        {
+          "id": "63.3",
+          "text": "Handles edge cases: both zero, one zero, negative values"
+        },
+        {
+          "id": "63.4",
+          "text": "Does not use reflect.DeepEqual — it uses == internally for floats"
+        }
+      ]
+    },
+    {
+      "id": 64,
+      "name": "append-aliasing-caller-slice-corruption",
+      "description": "Appending to a caller-supplied slice with spare capacity silently mutates the caller's backing array",
+      "prompt": "In package `pipeline`, write a function `AppendDefaults(tags []string) []string` that ensures the tags slice contains `\"env:prod\"`, `\"region:us-east\"`, and `\"service:api\"`. If a tag is already present, don't add a duplicate. Return the resulting slice.\n\nHere is a caller that will use this function:\n\n```go\ntags := make([]string, 2, 10)  // len=2, cap=10\ntags[0] = \"team:backend\"\ntags[1] = \"version:1.2\"\n\nresult := pipeline.AppendDefaults(tags)\nfmt.Println(tags[2])  // what does this print?\n```\n\nWrite the AppendDefaults function. Is there a safety concern the caller should know about?",
+      "trap": "Model writes `tags = append(tags, missing...)` and returns the modified slice without copying first. Since make([]string, 2, 10) has capacity 10, append reuses the backing array — `tags[2]` in the caller now reads 'env:prod' even though the caller never wrote to it. The model likely misses this shared-memory aliasing.",
+      "assertions": [
+        {
+          "id": "64.1",
+          "text": "Identifies the aliasing hazard: the caller's make([]string, 2, 10) has spare capacity, so appending into the parameter slice writes into memory the caller still owns"
+        },
+        {
+          "id": "64.2",
+          "text": "Uses full-slice expression `tags[:len(tags):len(tags)]`, `slices.Clone(tags)`, or equivalent before appending — this forces a new allocation and prevents writing into the caller's backing array"
+        },
+        {
+          "id": "64.3",
+          "text": "Does not add duplicate tags — checks for presence before appending each default"
+        },
+        {
+          "id": "64.4",
+          "text": "Explains or demonstrates that `tags[2]` in the caller would be silently overwritten without the fix"
+        }
+      ]
+    },
+    {
+      "id": 65,
+      "name": "handler-typed-nil-interface-return",
+      "description": "Returns untyped nil on success; does not leak *AppError(nil) through error interface",
+      "prompt": "In package `middleware`, define `AppError` struct with `Code int` and `Msg string` (with `Error() string` method). Write a function `Handle(handler func() *AppError) error` that calls the handler and returns its result as an `error`. Keep it to one line in the body — just `return handler()`.",
+      "trap": "Model follows the prompt's 'one line' instruction and writes `return handler()` — this implicitly converts nil *AppError to a non-nil error interface when handler returns nil",
+      "assertions": [
+        {
+          "id": "65.1",
+          "text": "Avoids typed nil leak from handler() return — `return handler()` implicitly converts *AppError(nil) to a non-nil error interface when handler returns nil *AppError"
+        },
+        {
+          "id": "65.2",
+          "text": "Uses conditional check like `if err := handler(); err != nil { return err }; return nil` to ensure untyped nil is returned on success"
+        },
+        {
+          "id": "65.3",
+          "text": "Does not assign handler() result directly to an `error` variable — `var err error = handler()` has the same typed-nil trap"
+        },
+        {
+          "id": "65.4",
+          "text": "AppError.Error() returns a meaningful message combining Code and Msg, not just Msg alone"
+        }
+      ]
+    },
+    {
+      "id": 66,
+      "name": "defensive-ingress-and-egress-slice",
+      "description": "Constructor copies input slice (ingress) and getter returns defensive copy (egress)",
+      "prompt": "In package `team`, write a struct `Team` with fields `name string` and `members []string`. Write a constructor `NewTeam(name string, members []string) *Team` and a getter `Members() []string`. Keep the constructor simple — just assign the fields.",
+      "trap": "Model follows 'just assign the fields' instruction — `members: members` shares backing array with caller; caller mutating their original slice after construction corrupts Team internals",
+      "assertions": [
+        {
+          "id": "66.1",
+          "text": "Constructor copies input slice (defensive ingress) — `members: members` shares the backing array; caller can mutate Team internals by modifying the original slice after construction"
+        },
+        {
+          "id": "66.2",
+          "text": "Members() returns defensive copy (egress) — `return t.members` lets callers append/modify the internal slice through the shared backing array"
+        },
+        {
+          "id": "66.3",
+          "text": "Uses slices.Clone, make+copy, or append([]string(nil), ...) for both ingress and egress copies"
+        },
+        {
+          "id": "66.4",
+          "text": "Fields are unexported (lowercase) — exported fields bypass getters entirely, defeating defensive copies"
+        },
+        {
+          "id": "66.5",
+          "text": "Handles nil input gracefully — constructor should not panic if members is nil"
+        }
+      ]
+    },
+    {
+      "id": 67,
+      "name": "defer-file-close-in-loop",
+      "description": "File handles closed per-iteration via helper, not deferred to function exit",
+      "prompt": "In package `fileutil`, write a function `WriteAll(paths []string, data []byte) error` that creates each file path with os.Create, writes `data` to it, and closes it. Use defer for closing. Return the first error encountered.",
+      "trap": "Model puts `defer f.Close()` inside the for loop — all file descriptors accumulate until WriteAll returns, risking fd exhaustion when paths is a long list",
+      "assertions": [
+        {
+          "id": "67.1",
+          "text": "No bare defer in loop body — `defer f.Close()` inside a for loop keeps all file handles open until the function returns, risking file descriptor exhaustion on large path lists"
+        },
+        {
+          "id": "67.2",
+          "text": "Extracts loop body to a helper function or uses IIFE so defer runs once per iteration"
+        },
+        {
+          "id": "67.3",
+          "text": "Helper function handles os.Create, defer f.Close(), and f.Write in a single scope"
+        },
+        {
+          "id": "67.4",
+          "text": "Errors from os.Create and f.Write are both checked and returned"
+        },
+        {
+          "id": "67.5",
+          "text": "Does not ignore the error from f.Close() — write errors can be reported via Close on buffered/sync writers"
+        }
+      ]
+    },
+    {
+      "id": 68,
+      "name": "initialize-result-map-before-merge",
+      "description": "Result's Labels map initialized before writing merged entries",
+      "prompt": "In package `config`, write a struct `Endpoint` with fields `Host string`, `Port int`, and `Labels map[string]string`. Write a function `Merge(a, b Endpoint) Endpoint` that returns a new Endpoint preferring b's non-zero values over a's. For Labels, merge both maps with b taking precedence.",
+      "trap": "Model creates `result := Endpoint{}` or `result := a` without initializing Labels, then writes to result.Labels — writing to a nil map panics at runtime",
+      "assertions": [
+        {
+          "id": "68.1",
+          "text": "Result Labels map initialized before write — creating an Endpoint{} with uninitialized Labels and then writing to it panics at runtime"
+        },
+        {
+          "id": "68.2",
+          "text": "Labels from both inputs are merged correctly with b taking precedence on key conflicts"
+        },
+        {
+          "id": "68.3",
+          "text": "Does not modify input a or b's Labels maps — creates a fresh map for the result (defensive copy)"
+        },
+        {
+          "id": "68.4",
+          "text": "Handles nil Labels in a or b gracefully — ranging over a nil map is safe (0 iterations) but the result map must still be initialized"
+        },
+        {
+          "id": "68.5",
+          "text": "Uses correct zero-value checks — empty string for Host, 0 for Port"
+        }
+      ]
+    },
+    {
+      "id": 69,
+      "name": "copy-byte-subslice-both-branches",
+      "description": "Both found-word and full-line fallback paths return independent copies",
+      "prompt": "In package `text`, write a function `FirstWord(line []byte) []byte` that returns the first whitespace-delimited word from the line. Use `bytes.IndexByte(line, ' ')`. If no space found, return the whole line.",
+      "trap": "Model copies the found-word branch but returns `line` directly for the no-space case — both branches retain the full input buffer in memory",
+      "assertions": [
+        {
+          "id": "69.1",
+          "text": "Returns copy, not subslice retaining backing array — `line[:i]` keeps the entire input buffer alive in memory even if only a few bytes are needed"
+        },
+        {
+          "id": "69.2",
+          "text": "Uses slices.Clone, make+copy, or append([]byte(nil), ...) to create an independent copy"
+        },
+        {
+          "id": "69.3",
+          "text": "Both the found-word path and the full-line fallback path return copies (not just one branch)"
+        },
+        {
+          "id": "69.4",
+          "text": "Handles edge cases: empty input, input starting with space, single-character input"
+        }
+      ]
+    },
+    {
+      "id": 70,
+      "name": "bounds-check-before-narrowing-int-to-uint16",
+      "description": "Validates port fits in uint16 range before conversion to prevent silent truncation",
+      "prompt": "In package `net`, write a function `EncodeAddr(host string, port int) ([]byte, error)` that creates a binary-encoded address. Write the port as a big-endian uint16 followed by the host bytes. Use `binary.BigEndian.PutUint16`.",
+      "trap": "Model uses `uint16(port)` directly — port 65536 silently becomes 0, port -1 becomes 65535, creating malformed binary addresses without any error",
+      "assertions": [
+        {
+          "id": "70.1",
+          "text": "Validates port fits in uint16 range (0-65535) — `uint16(port)` silently truncates values outside this range (e.g., port 65536 becomes 0, port -1 becomes 65535)"
+        },
+        {
+          "id": "70.2",
+          "text": "Returns error for negative ports or ports > 65535"
+        },
+        {
+          "id": "70.3",
+          "text": "Uses math.MaxUint16 or literal 65535 for the upper bound check"
+        },
+        {
+          "id": "70.4",
+          "text": "Correctly allocates buffer of size 2+len(host) for the binary encoding"
+        },
+        {
+          "id": "70.5",
+          "text": "Uses binary.BigEndian.PutUint16 as specified, not binary.Write or manual byte manipulation"
+        }
+      ]
+    },
+    {
+      "id": 71,
+      "name": "assert-helper-t-helper-epsilon",
+      "description": "Test helper calls t.Helper() and uses epsilon comparison for float values",
+      "prompt": "In package `testing`, write a function `AssertPrice(t *testing.T, got, want float64)` that calls t.Errorf if the prices don't match. Use a clear error message showing both values.",
+      "trap": "Model uses `got != want` for float comparison and omits t.Helper() — failures report the helper's line and pass for prices that differ by tiny fractions",
+      "assertions": [
+        {
+          "id": "71.1",
+          "text": "Uses epsilon comparison (math.Abs) not == or != — float arithmetic is not exact; prices computed via multiplication/division may differ by tiny fractions"
+        },
+        {
+          "id": "71.2",
+          "text": "Epsilon value is reasonable for financial contexts (1e-2 for cents, or 1e-9 for general precision)"
+        },
+        {
+          "id": "71.3",
+          "text": "Calls t.Helper() so test failure points to the caller, not the helper itself"
+        },
+        {
+          "id": "71.4",
+          "text": "Error message includes both got and want values for debugging"
+        },
+        {
+          "id": "71.5",
+          "text": "Does not use reflect.DeepEqual for float comparison — it uses == internally and has the same problem"
+        }
+      ]
+    },
+    {
+      "id": 72,
+      "name": "nil-check-optional-callbacks",
+      "description": "Both OnStart and OnStop checked for nil before calling",
+      "prompt": "In package `server`, write a struct `Server` with fields `Addr string`, `OnStart func()`, and `OnStop func()`. Add a `Start() error` method that calls OnStart, prints \"listening on Addr\", and returns nil. Add a `Stop()` method that calls OnStop and prints \"stopped\".",
+      "trap": "Model calls both callbacks without nil checks — using Server with only Addr set causes a panic when Start or Stop is called",
+      "assertions": [
+        {
+          "id": "72.1",
+          "text": "Checks OnStart for nil before calling in Start() — calling a nil func panics at runtime"
+        },
+        {
+          "id": "72.2",
+          "text": "Checks OnStop for nil before calling in Stop() — same nil func panic risk"
+        },
+        {
+          "id": "72.3",
+          "text": "Both methods complete their remaining work (print, return nil) even when the callback is nil"
+        },
+        {
+          "id": "72.4",
+          "text": "Server is usable with zero-value callbacks — `Server{Addr: \":8080\"}` should work without setting OnStart/OnStop"
+        }
+      ]
+    },
+    {
+      "id": 73,
+      "name": "guard-integer-division-by-zero",
+      "description": "Guards against zero capacity to prevent integer division panic",
+      "prompt": "In package `pool`, write a function `Utilization(active, capacity int) int` that returns the pool utilization as a percentage (0-100). Active is current connections, capacity is max. Return `active * 100 / capacity`.",
+      "trap": "Model computes `active * 100 / capacity` directly without checking capacity == 0 — integer division by zero causes an unrecoverable runtime panic",
+      "assertions": [
+        {
+          "id": "73.1",
+          "text": "Guards against zero capacity — integer division by zero panics at runtime with an unrecoverable crash; must check capacity == 0 first"
+        },
+        {
+          "id": "73.2",
+          "text": "Returns a sensible default (0) or an error when capacity is zero"
+        },
+        {
+          "id": "73.3",
+          "text": "Uses integer arithmetic (not float conversion) since the return type is int"
+        },
+        {
+          "id": "73.4",
+          "text": "Multiplication order `active * 100 / capacity` preserves precision better than `active / capacity * 100`"
+        }
+      ]
+    },
+    {
+      "id": 74,
+      "name": "defensive-copy-slice-from-map",
+      "description": "GetAll returns defensive copy of the internal slice value from map",
+      "prompt": "In package `store`, write a struct `Store` with field `data map[string][]string`. Add a constructor `New() *Store`, a method `Add(key, value string)`, and a method `GetAll(key string) []string` that returns all values for that key.",
+      "trap": "Model returns `s.data[key]` directly — callers receive a reference to the internal slice and can append to it, silently mutating the Store's data through shared backing array",
+      "assertions": [
+        {
+          "id": "74.1",
+          "text": "GetAll returns defensive copy of internal slice — `return s.data[key]` lets callers mutate the Store's internal data via the shared backing array"
+        },
+        {
+          "id": "74.2",
+          "text": "Uses slices.Clone, make+copy, or append([]string(nil), ...) to create an independent copy"
+        },
+        {
+          "id": "74.3",
+          "text": "Constructor initializes the data map with make() — writing to a nil map panics"
+        },
+        {
+          "id": "74.4",
+          "text": "Add method correctly uses append to grow the slice for the given key"
+        },
+        {
+          "id": "74.5",
+          "text": "GetAll returns nil or empty slice (not panics) for keys that don't exist"
+        }
+      ]
+    },
+    {
+      "id": 75,
+      "name": "defer-close-reader-in-loop",
+      "description": "io.Closer readers closed per-iteration via helper, not deferred to function exit",
+      "prompt": "In package `scanner`, write a function `ScanAll(readers []io.Reader) ([][]byte, error)` that reads each reader with io.ReadAll, collecting results. If a reader implements io.Closer, use defer to close it. Return all data or the first error.",
+      "trap": "Model puts `defer r.(io.Closer).Close()` inside the for loop — all readers that implement io.Closer remain open until ScanAll returns, consuming resources for the entire function duration",
+      "assertions": [
+        {
+          "id": "75.1",
+          "text": "No bare defer in loop body — defer close inside a for loop keeps all readers open until function exit, preventing resource cleanup between iterations"
+        },
+        {
+          "id": "75.2",
+          "text": "Extracts loop body to a helper function so defer fires per iteration"
+        },
+        {
+          "id": "75.3",
+          "text": "Uses type assertion `r.(io.Closer)` with comma-ok form to conditionally close only closeable readers"
+        },
+        {
+          "id": "75.4",
+          "text": "Preallocates results slice with `make([][]byte, 0, len(readers))` for known capacity"
+        }
+      ]
+    },
+    {
+      "id": 76,
+      "name": "guard-division-by-zero-float-precision",
+      "description": "Guards against zero before and converts to float64 before division for precision",
+      "prompt": "In package `metric`, write a function `PercentChange(before, after int) float64` that returns the percentage change from before to after. Formula: `(after - before) * 100 / before`. Keep it simple — one-liner.",
+      "trap": "Model computes `(after-before) * 100 / before` with integer arithmetic — result is truncated before float conversion, and division by zero panics when before is 0",
+      "assertions": [
+        {
+          "id": "76.1",
+          "text": "Guards against zero before — integer division by zero panics; float division by zero produces Inf/NaN which is silently wrong"
+        },
+        {
+          "id": "76.2",
+          "text": "Converts to float64 before division to preserve fractional precision — integer `(after-before)*100/before` truncates the result"
+        },
+        {
+          "id": "76.3",
+          "text": "Returns a sensible default (0.0) or changes signature to return error when before is zero"
+        },
+        {
+          "id": "76.4",
+          "text": "Formula is mathematically correct: `float64(after-before) / float64(before) * 100` or equivalent"
+        }
+      ]
+    }
+  ]
+}

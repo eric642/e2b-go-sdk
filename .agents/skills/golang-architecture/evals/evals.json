@@ -1,0 +1,1464 @@
+{
+  "skill_name": "golang-architecture",
+  "evals": [
+    {
+      "id": 1,
+      "name": "ask-architecture-before-structuring",
+      "description": "Tests whether the model asks the developer about architecture preference before imposing one",
+      "prompt": "I'm starting a new Go web service project. Set up the directory structure for me.",
+      "trap": "Without the skill, the model immediately generates a directory structure without asking. The skill says to ASK the developer what architecture they prefer before structuring.",
+      "assertions": [
+        {
+          "id": "1.1",
+          "text": "Asks the developer which software architecture they prefer (clean, hexagonal, DDD, flat, etc.)"
+        },
+        {
+          "id": "1.2",
+          "text": "Asks about the project scope/size to right-size the structure"
+        },
+        {
+          "id": "1.3",
+          "text": "Does NOT immediately impose a specific architecture without asking"
+        },
+        {
+          "id": "1.4",
+          "text": "Mentions dependency injection approach as a follow-up question"
+        },
+        {
+          "id": "1.5",
+          "text": "Mentions that small projects should not be over-structured"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "cmd-directory-minimal-logic",
+      "description": "Tests whether the model keeps cmd/ main.go minimal with no business logic",
+      "prompt": "I'm organizing a Go project with an HTTP server. Here's my cmd/server/main.go that has 200 lines including request parsing, database queries, and response formatting. Is this OK?",
+      "trap": "Without the skill, the model may accept the large main.go or only suggest minor improvements. The skill says cmd/ MUST contain only main.go with minimal logic -- parse flags, wire dependencies, call Run().",
+      "assertions": [
+        {
+          "id": "2.1",
+          "text": "Says business logic does NOT belong in cmd/server/main.go"
+        },
+        {
+          "id": "2.2",
+          "text": "Says cmd/ should contain minimal logic: parse flags, wire dependencies, call Run()"
+        },
+        {
+          "id": "2.3",
+          "text": "Recommends moving business logic to internal/ or pkg/"
+        },
+        {
+          "id": "2.4",
+          "text": "main.go should primarily do dependency wiring and startup"
+        },
+        {
+          "id": "2.5",
+          "text": "NEVER put request parsing, database queries, or response formatting in cmd/"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "no-src-utils-helpers-common",
+      "description": "Tests whether the model avoids Java-style src/ directory and generic package names",
+      "prompt": "I'm organizing my Go project. I created these directories: src/ for source code, utils/ for utility functions, helpers/ for helper functions, and common/ for shared code. Here's my structure:\n\n```\nmyproject/\n  src/\n    main.go\n  utils/\n    string_utils.go\n  helpers/\n    http_helper.go\n  common/\n    types.go\n```\n\nDoes this look good?",
+      "trap": "Without the skill, the model may accept some of these (especially utils/) as reasonable. The skill explicitly calls out src/, utils/, helpers/, common/ as anti-patterns.",
+      "assertions": [
+        {
+          "id": "3.1",
+          "text": "Rejects src/ directory (Go doesn't use /src, it's a Java pattern)"
+        },
+        {
+          "id": "3.2",
+          "text": "Rejects utils/ as a generic package name"
+        },
+        {
+          "id": "3.3",
+          "text": "Rejects helpers/ as a generic package name"
+        },
+        {
+          "id": "3.4",
+          "text": "Rejects common/ as a generic package name"
+        },
+        {
+          "id": "3.5",
+          "text": "Suggests domain-specific package names instead (e.g. format/, stringconv/)"
+        },
+        {
+          "id": "3.6",
+          "text": "Recommends putting main.go inside cmd/{name}/ not at root or in src/"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "module-naming-conventions",
+      "description": "Tests whether the model follows Go module naming conventions",
+      "prompt": "I'm initializing a new Go module. Which of these module names is correct?\n\n1. `module myproject`\n2. `module github.com/jdoe/MyProject`\n3. `module github.com/jdoe/my-project`\n4. `module github.com/jdoe/my_project`\n5. `module utils`",
+      "trap": "Without the skill, the model may accept multiple options or not know the specific conventions. The skill has clear rules: must match repo URL, lowercase only, hyphens for multi-word.",
+      "assertions": [
+        {
+          "id": "4.1",
+          "text": "Identifies option 3 (github.com/jdoe/my-project) as correct"
+        },
+        {
+          "id": "4.2",
+          "text": "Rejects option 1 (myproject) -- must match repository URL"
+        },
+        {
+          "id": "4.3",
+          "text": "Rejects option 2 (MyProject) -- must be lowercase only"
+        },
+        {
+          "id": "4.4",
+          "text": "Rejects option 4 (my_project) -- use hyphens not underscores"
+        },
+        {
+          "id": "4.5",
+          "text": "Rejects option 5 (utils) -- not semantic, doesn't match a repo URL"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "name": "internal-vs-pkg-decision",
+      "description": "Tests whether the model correctly decides between internal/ and pkg/ based on export requirements",
+      "prompt": "I'm building a Go project with both a web service and a shared logging library that other teams want to import. I also have some private request parsing code. Where should I put each?",
+      "trap": "Without the skill, the model may put everything in internal/ or everything in pkg/. The skill says internal/ for non-exported, pkg/ only when code is useful to external consumers.",
+      "assertions": [
+        {
+          "id": "5.1",
+          "text": "Puts the shared logging library in pkg/ (useful to external consumers)"
+        },
+        {
+          "id": "5.2",
+          "text": "Puts the private request parsing code in internal/ (not exported)"
+        },
+        {
+          "id": "5.3",
+          "text": "Explains that internal/ cannot be imported by external packages (Go enforces this)"
+        },
+        {
+          "id": "5.4",
+          "text": "Mentions that pkg/ should only be used when code is genuinely intended for external use"
+        },
+        {
+          "id": "5.5",
+          "text": "Service/business logic goes in internal/ by default"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "name": "workspace-when-to-use",
+      "description": "Tests whether the model recommends go.work only for multi-module scenarios, not single-module projects",
+      "prompt": "I have a single Go module project (one go.mod) with about 10 packages. A colleague suggested I add go.work for better organization. Should I?",
+      "trap": "Without the skill, the model may recommend go.work for any multi-package project. The skill says don't use workspaces for single-module projects or simple applications.",
+      "assertions": [
+        {
+          "id": "6.1",
+          "text": "Recommends AGAINST using go.work for a single-module project"
+        },
+        {
+          "id": "6.2",
+          "text": "Explains that go.work is for multiple related Go modules that import each other"
+        },
+        {
+          "id": "6.3",
+          "text": "Mentions that a single module with multiple packages does not need a workspace"
+        },
+        {
+          "id": "6.4",
+          "text": "Lists valid use cases: monorepo with separate modules, local cross-module development"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "name": "twelve-factor-app-conventions",
+      "description": "Tests whether the model applies 12-Factor App principles for Go services",
+      "prompt": "I'm building a Go microservice that reads its database URL from a config.yaml file checked into the repository. It writes logs to a file at /var/log/myapp.log. Is this a good approach?",
+      "trap": "Without the skill, the model may accept file-based config and log files as reasonable. The skill says to follow 12-Factor: config via environment variables, logs to stdout.",
+      "assertions": [
+        {
+          "id": "7.1",
+          "text": "Recommends reading database URL from environment variables, not a checked-in config file"
+        },
+        {
+          "id": "7.2",
+          "text": "Recommends writing logs to stdout, not to a file"
+        },
+        {
+          "id": "7.3",
+          "text": "References or describes 12-Factor App principles"
+        },
+        {
+          "id": "7.4",
+          "text": "Mentions that sensitive values (like DB URLs) should never be in config files committed to source control"
+        },
+        {
+          "id": "7.5",
+          "text": "Explains WHY: environment-based config allows different values per deployment without code changes"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "name": "library-layout-no-cmd",
+      "description": "Tests whether the model uses the correct layout for a Go library (no cmd/, public packages at root level)",
+      "prompt": "I'm creating a Go library for other developers to import (a logging package). How should I structure the project? Should I put the code in cmd/ or pkg/?",
+      "trap": "Without the skill, the model may use the application layout (cmd/, internal/, pkg/) for a library. The skill shows that libraries put public API in root-level directories, no cmd/ unless example binaries.",
+      "assertions": [
+        {
+          "id": "8.1",
+          "text": "Public API packages are at the root level (e.g. logger/), NOT inside pkg/ or cmd/"
+        },
+        {
+          "id": "8.2",
+          "text": "No cmd/ directory (unless for example binaries)"
+        },
+        {
+          "id": "8.3",
+          "text": "Uses internal/ for private implementation details"
+        },
+        {
+          "id": "8.4",
+          "text": "Includes example/ directory for usage examples"
+        },
+        {
+          "id": "8.5",
+          "text": "Structure follows the library layout pattern, not the application layout pattern"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "name": "test-file-colocation",
+      "description": "Tests whether the model co-locates test files with the code they test",
+      "prompt": "I'm organizing tests in my Go project. Should I create a separate tests/ directory at the root to hold all test files, or should I put them somewhere else?",
+      "trap": "Without the skill, the model may accept a centralized tests/ directory (common in Python/Java). The skill says co-locate _test.go files with the code they test.",
+      "assertions": [
+        {
+          "id": "9.1",
+          "text": "Recommends co-locating test files with the code they test (same directory)"
+        },
+        {
+          "id": "9.2",
+          "text": "Test files use the _test.go suffix"
+        },
+        {
+          "id": "9.3",
+          "text": "Does NOT recommend a centralized tests/ directory for unit tests"
+        },
+        {
+          "id": "9.4",
+          "text": "Mentions testdata/ directory for test fixtures"
+        },
+        {
+          "id": "9.5",
+          "text": "Distinguishes between white-box (same package) and black-box (package_test) testing approaches"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "name": "config-sensitive-values-env-only",
+      "description": "Tests whether the model requires sensitive configuration values from env vars or secret managers, never config files",
+      "prompt": "I'm setting up configuration for my Go service using Viper. I want to put the database password, API keys, and JWT secret in my config.yaml for convenience. Then I'll use mapstructure tags to load them. Good idea?",
+      "trap": "Without the skill, the model may accept putting secrets in config files as long as the file is gitignored. The skill says sensitive values MUST come from env vars or secret managers, NEVER config files.",
+      "assertions": [
+        {
+          "id": "10.1",
+          "text": "Rejects putting database password, API keys, and JWT secret in config.yaml"
+        },
+        {
+          "id": "10.2",
+          "text": "Recommends environment variables for sensitive values"
+        },
+        {
+          "id": "10.3",
+          "text": "May suggest a secret manager as an alternative"
+        },
+        {
+          "id": "10.4",
+          "text": "Config files are acceptable for non-sensitive values (port, log level, etc.)"
+        },
+        {
+          "id": "10.5",
+          "text": "Explains WHY: config files can be accidentally committed, leaked in backups, or visible to other processes"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "name": "multiple-binaries-cmd-structure",
+      "description": "Tests whether the model creates separate subdirectories in cmd/ for each binary",
+      "prompt": "My Go project needs three binaries: an API server, a CLI tool, and a database migration utility. How should I organize the cmd/ directory?",
+      "trap": "Without the skill, the model may put all three in a single cmd/main.go with subcommands. The skill shows separate subdirectories in cmd/ for each binary.",
+      "assertions": [
+        {
+          "id": "11.1",
+          "text": "Creates separate subdirectories: cmd/server/, cmd/cli/, cmd/migrate/ (or similar names)"
+        },
+        {
+          "id": "11.2",
+          "text": "Each subdirectory has its own main.go with package main"
+        },
+        {
+          "id": "11.3",
+          "text": "Each binary can be built independently (go build ./cmd/server, etc.)"
+        },
+        {
+          "id": "11.4",
+          "text": "Mentions go build ./cmd/... to build all binaries at once"
+        },
+        {
+          "id": "11.5",
+          "text": "Business logic is in internal/, not duplicated across cmd/ directories"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "name": "functional-options-over-builder",
+      "description": "Tests whether the model recommends functional options (not builder pattern) as the preferred constructor pattern in Go, and whether options return errors for validation",
+      "prompt": "I need to create a Go HTTP server struct with optional configuration: read timeout, write timeout, max connections, TLS config, and a logger. Design the constructor API. The config will grow over time as we add features.",
+      "trap": "Without the skill, the model may default to a builder pattern, config struct, or positional arguments instead of functional options. It may also forget that options should return errors when validation can fail.",
+      "assertions": [
+        {
+          "id": "12.1",
+          "text": "Uses functional options pattern (Option type as func that modifies the struct)"
+        },
+        {
+          "id": "12.2",
+          "text": "Constructor accepts variadic ...Option parameter"
+        },
+        {
+          "id": "12.3",
+          "text": "Each option is a With* function returning an Option"
+        },
+        {
+          "id": "12.4",
+          "text": "Sets sensible defaults inside the constructor before applying options"
+        },
+        {
+          "id": "12.5",
+          "text": "Mentions that functional options should return an error if validation can fail, or demonstrates error-returning option variant"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "name": "avoid-init-function",
+      "description": "Tests whether the model avoids init() for database initialization and uses explicit constructors instead",
+      "prompt": "I'm writing a Go web service. I want to set up the database connection pool when the application starts. Here's my approach:\n\n```go\nvar db *sql.DB\n\nfunc init() {\n    var err error\n    db, err = sql.Open(\"postgres\", os.Getenv(\"DATABASE_URL\"))\n    if err != nil {\n        log.Fatal(err)\n    }\n}\n```\n\nIs this a good pattern? How should I improve it?",
+      "trap": "Without the skill, the model may accept the init() pattern as fine or only suggest minor improvements. The skill explicitly warns against init() for hidden dependencies and testability issues.",
+      "assertions": [
+        {
+          "id": "13.1",
+          "text": "Explicitly recommends against using init() for database initialization"
+        },
+        {
+          "id": "13.2",
+          "text": "Mentions that init() makes testing harder or unpredictable"
+        },
+        {
+          "id": "13.3",
+          "text": "Mentions that init() cannot return errors (must panic or log.Fatal)"
+        },
+        {
+          "id": "13.4",
+          "text": "Suggests explicit constructor or initialization function (e.g. NewUserRepository(db))"
+        },
+        {
+          "id": "13.5",
+          "text": "Mentions that init() runs before main/tests creating hidden dependencies"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "name": "enum-start-at-one",
+      "description": "Tests whether the model starts Go enums at 1 or uses an Unknown/Invalid sentinel at 0",
+      "prompt": "I need to define a Go enum for order status with values: pending, processing, shipped, delivered, cancelled. Write the type and constants using iota.",
+      "trap": "Without the skill, the model often starts the first meaningful enum value at 0 (iota), making the zero value silently pass as a valid status. The skill says enums SHOULD start at 1 or use an Unknown sentinel at 0.",
+      "assertions": [
+        {
+          "id": "14.1",
+          "text": "Zero value (iota = 0) is either skipped, named Unknown, Invalid, or Unspecified -- not a meaningful business value"
+        },
+        {
+          "id": "14.2",
+          "text": "First meaningful enum value starts at 1 or higher"
+        },
+        {
+          "id": "14.3",
+          "text": "Explains WHY: Go's zero value would silently pass as the first enum member if it were meaningful"
+        },
+        {
+          "id": "14.4",
+          "text": "Uses a custom type (not raw int or string)"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "name": "panic-vs-error-judgment",
+      "description": "Tests whether the model correctly distinguishes when to panic vs return an error",
+      "prompt": "I'm implementing a configuration parser in Go. If the config file has an invalid format, should I panic or return an error? What about if a required field is missing? What about if a developer passes nil to a function that documents it must not be nil?",
+      "trap": "Without the skill, the model may be inconsistent about when to panic. The skill says panic is for bugs (violated invariants, impossible nil), not expected errors (invalid input, missing fields).",
+      "assertions": [
+        {
+          "id": "15.1",
+          "text": "Invalid config format: return error (caller can handle it)"
+        },
+        {
+          "id": "15.2",
+          "text": "Missing required field: return error (expected validation failure)"
+        },
+        {
+          "id": "15.3",
+          "text": "Nil passed to non-nil function: panic is acceptable (violated invariant, bug in caller)"
+        },
+        {
+          "id": "15.4",
+          "text": "Articulates the principle: panic is for bugs/invariant violations, errors are for expected failures"
+        },
+        {
+          "id": "15.5",
+          "text": "Mentions Must* constructor pattern as a valid panic use case (init-time convenience)"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "name": "runtime-addcleanup-over-setfinalizer",
+      "description": "Tests whether the model recommends runtime.AddCleanup over runtime.SetFinalizer for Go 1.24+",
+      "prompt": "I have a Go struct that wraps a C resource handle (via cgo). When the Go object is garbage collected, I need to release the C handle. I'm using Go 1.24. What's the best approach for automatic cleanup?",
+      "trap": "Without the skill, the model almost always suggests runtime.SetFinalizer, which is the older and more well-known API. The skill specifically says to prefer runtime.AddCleanup (Go 1.24+).",
+      "assertions": [
+        {
+          "id": "16.1",
+          "text": "Recommends runtime.AddCleanup as the preferred approach"
+        },
+        {
+          "id": "16.2",
+          "text": "Mentions that AddCleanup supports multiple cleanups on the same object"
+        },
+        {
+          "id": "16.3",
+          "text": "Mentions that AddCleanup avoids object resurrection risk (cleanup receives a copy of the value, not the object)"
+        },
+        {
+          "id": "16.4",
+          "text": "Mentions that AddCleanup works even with cyclic references"
+        },
+        {
+          "id": "16.5",
+          "text": "Either warns against SetFinalizer or explains why AddCleanup is better"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "name": "resource-pool-bounded-channel",
+      "description": "Tests whether the model uses bounded channel-based pools and emphasizes limiting resource pool sizes",
+      "prompt": "I need to implement a connection pool in Go for reusing database connections. I want it to be concurrent-safe and have a maximum size. Design the pool.",
+      "trap": "Without the skill, the model may use sync.Pool (wrong: not bounded, items can be evicted) or an unbounded slice with mutex. The skill says use channels with fixed capacity for bounded allocation.",
+      "assertions": [
+        {
+          "id": "17.1",
+          "text": "Uses a buffered channel (chan *Conn with fixed capacity) as the pool mechanism"
+        },
+        {
+          "id": "17.2",
+          "text": "Pool has a maximum size / bounded capacity"
+        },
+        {
+          "id": "17.3",
+          "text": "Get operation uses select with context for timeout/cancellation"
+        },
+        {
+          "id": "17.4",
+          "text": "Put operation handles pool-full case (discards excess connections)"
+        },
+        {
+          "id": "17.5",
+          "text": "Does NOT use sync.Pool as the primary pooling mechanism (sync.Pool has no size guarantee and items can be reclaimed)"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "name": "graceful-shutdown-signal-notifycontext",
+      "description": "Tests whether the model uses signal.NotifyContext for graceful shutdown",
+      "prompt": "I'm building a Go HTTP server that needs to handle SIGINT and SIGTERM for graceful shutdown. Show me how to implement this properly.",
+      "trap": "Without the skill, the model may use a raw os.Signal channel with signal.Notify instead of signal.NotifyContext. The skill specifically says to use signal.NotifyContext.",
+      "assertions": [
+        {
+          "id": "18.1",
+          "text": "Uses signal.NotifyContext (not raw signal.Notify with a channel)"
+        },
+        {
+          "id": "18.2",
+          "text": "Listens for both SIGINT and SIGTERM"
+        },
+        {
+          "id": "18.3",
+          "text": "Starts the HTTP server in a goroutine"
+        },
+        {
+          "id": "18.4",
+          "text": "Creates a separate timeout context for the shutdown phase (e.g. context.WithTimeout for draining)"
+        },
+        {
+          "id": "18.5",
+          "text": "Closes other resources (DB, queues) after server shutdown"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "name": "iterator-streaming-large-data",
+      "description": "Tests whether the model uses iterators/streaming instead of loading all data into memory for large datasets",
+      "prompt": "I need to export 2 million user records from a PostgreSQL database to a JSON HTTP response in Go. The users table has columns: id, name, email, created_at. Write the handler.",
+      "trap": "Without the skill, the model typically loads all rows into a []User slice, then json.Marshal the whole thing. The skill says to stream large transfers to prevent OOM.",
+      "assertions": [
+        {
+          "id": "19.1",
+          "text": "Does NOT load all 2M rows into a slice in memory"
+        },
+        {
+          "id": "19.2",
+          "text": "Streams the JSON response (writes records one at a time to the ResponseWriter)"
+        },
+        {
+          "id": "19.3",
+          "text": "Uses rows.Next() loop or iter.Seq2 iterator pattern"
+        },
+        {
+          "id": "19.4",
+          "text": "Defers rows.Close() immediately after query"
+        },
+        {
+          "id": "19.5",
+          "text": "Mentions OOM risk or memory concern as motivation for streaming"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "name": "regexp-compile-once",
+      "description": "Tests whether the model compiles regexps at package level, not inside functions",
+      "prompt": "Write a Go function that validates email addresses using a regular expression. It will be called thousands of times per second in an HTTP handler.",
+      "trap": "Without the skill, the model often compiles the regexp inside the function on every call. The skill says regexp MUST be compiled once at package level.",
+      "assertions": [
+        {
+          "id": "20.1",
+          "text": "Compiles the regexp at package level (var emailRegex = regexp.MustCompile(...))"
+        },
+        {
+          "id": "20.2",
+          "text": "Does NOT compile the regexp inside the validation function"
+        },
+        {
+          "id": "20.3",
+          "text": "Uses regexp.MustCompile (not regexp.Compile) for package-level initialization"
+        },
+        {
+          "id": "20.4",
+          "text": "Explains WHY: compilation is O(n) and allocates, so doing it per-call is wasteful"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "name": "architecture-right-sizing",
+      "description": "Tests whether the model avoids over-architecting small projects and asks for preferences",
+      "prompt": "I'm starting a new Go project: a CLI tool that reads a CSV file, transforms the data, and writes it to stdout. It will be about 200 lines of code. What architecture and directory structure should I use?",
+      "trap": "Without the skill, the model may suggest clean architecture, hexagonal patterns, handler/service/repository layers, or DI frameworks for a 200-line CLI. The skill says don't impose complex architecture on small projects.",
+      "assertions": [
+        {
+          "id": "21.1",
+          "text": "Recommends a flat or minimal structure (no multi-layer architecture)"
+        },
+        {
+          "id": "21.2",
+          "text": "Does NOT suggest clean architecture, hexagonal, DDD, or ports and adapters for a 200-line CLI"
+        },
+        {
+          "id": "21.3",
+          "text": "Does NOT suggest dependency injection frameworks"
+        },
+        {
+          "id": "21.4",
+          "text": "Structure has at most cmd/ and possibly internal/, not handler/service/repository layers"
+        },
+        {
+          "id": "21.5",
+          "text": "Mentions that architecture complexity should match project scope"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "name": "hexagonal-vs-clean-architecture",
+      "description": "Tests whether the model correctly distinguishes hexagonal from clean architecture and when each applies",
+      "prompt": "I'm building a Go service (about 8K lines) that processes orders. It needs HTTP and gRPC entry points, plus a message consumer for async events. It talks to PostgreSQL, Stripe, and Redis. Should I use clean architecture or hexagonal architecture? Explain the difference and recommend one.",
+      "trap": "Without the skill, the model may conflate the two architectures or fail to identify that hexagonal is better when multiple entry points are needed. The skill has distinct guides for each.",
+      "assertions": [
+        {
+          "id": "22.1",
+          "text": "Correctly explains that hexagonal uses ports (interfaces) and adapters (implementations) with primary (driving) and secondary (driven) distinction"
+        },
+        {
+          "id": "22.2",
+          "text": "Correctly explains that clean architecture uses dependency rule (dependencies point inward) with entities/use-cases/adapters/frameworks layers"
+        },
+        {
+          "id": "22.3",
+          "text": "Recommends hexagonal for this specific case (multiple entry points: HTTP, gRPC, message consumer)"
+        },
+        {
+          "id": "22.4",
+          "text": "Mentions that both keep domain logic pure and free from infrastructure dependencies"
+        },
+        {
+          "id": "22.5",
+          "text": "Provides a directory structure example with adapter/primary/ and adapter/secondary/ or equivalent hexagonal layout"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "name": "ddd-aggregate-root-mutations",
+      "description": "Tests whether the model enforces that all mutations go through the aggregate root in DDD",
+      "prompt": "I'm implementing DDD in Go for an e-commerce system. I have an Order aggregate with OrderItems. A user wants to add an item to an existing order. Show me how to structure this. The order should only be editable when in Draft status.",
+      "trap": "Without the skill, the model may allow direct mutation of OrderItems from outside the aggregate, or may not enforce the aggregate root pattern. The skill says all mutations go through the root.",
+      "assertions": [
+        {
+          "id": "23.1",
+          "text": "AddItem is a method on the Order aggregate root (not on OrderItem or a service)"
+        },
+        {
+          "id": "23.2",
+          "text": "Order fields (items, status) are unexported to prevent external mutation"
+        },
+        {
+          "id": "23.3",
+          "text": "AddItem validates the status constraint (only Draft orders are editable)"
+        },
+        {
+          "id": "23.4",
+          "text": "Repository interface is defined in the domain package, not in the infrastructure package"
+        },
+        {
+          "id": "23.5",
+          "text": "Domain types have no infrastructure imports (no sql, no http, no framework dependencies)"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "name": "ddd-bounded-context-communication",
+      "description": "Tests whether the model uses anti-corruption layers or domain events between bounded contexts, not direct imports",
+      "prompt": "I have two bounded contexts in my Go DDD project: Order and Billing. When an order is placed, the billing context needs to create an invoice. How should these contexts communicate?",
+      "trap": "Without the skill, the model may suggest billing directly importing order's internal types. The skill says contexts communicate through domain events or anti-corruption layers, never by importing each other's internal types.",
+      "assertions": [
+        {
+          "id": "24.1",
+          "text": "Uses domain events (e.g. OrderPlaced event) for cross-context communication"
+        },
+        {
+          "id": "24.2",
+          "text": "Billing context does NOT directly import order's internal domain types"
+        },
+        {
+          "id": "24.3",
+          "text": "Shows or describes an anti-corruption layer that translates order events to billing-specific types"
+        },
+        {
+          "id": "24.4",
+          "text": "Each bounded context has its own domain, application, and adapter layers"
+        },
+        {
+          "id": "24.5",
+          "text": "Mentions that direct type imports between contexts create tight coupling"
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "name": "make-illegal-states-unrepresentable",
+      "description": "Tests whether the model uses types to enforce invariants rather than runtime validation",
+      "prompt": "I have a Go function that sends notifications. It accepts an email address as a string parameter. Sometimes callers pass invalid emails and we only catch it at send time. How can I prevent invalid emails from reaching the send function?",
+      "trap": "Without the skill, the model typically adds validation at the top of the send function. The skill says to make illegal states unrepresentable using types.",
+      "assertions": [
+        {
+          "id": "25.1",
+          "text": "Creates a dedicated Email type (struct with unexported address field)"
+        },
+        {
+          "id": "25.2",
+          "text": "Email can only be created via a constructor (NewEmail) that validates the address"
+        },
+        {
+          "id": "25.3",
+          "text": "The send function accepts the Email type instead of a raw string"
+        },
+        {
+          "id": "25.4",
+          "text": "Explains the principle: make illegal states unrepresentable through the type system"
+        },
+        {
+          "id": "25.5",
+          "text": "The unexported field prevents creating an Email without validation (cannot set address from outside the package)"
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "name": "fail-fast-validate-at-boundaries",
+      "description": "Tests whether the model validates at system boundaries and trusts data internally, rather than re-validating at every layer",
+      "prompt": "I'm building a Go web service with three layers: HTTP handler, service, and repository. Should I validate the request body (user_id, email, age) in all three layers to be safe?",
+      "trap": "Without the skill, the model may suggest defensive validation at every layer for 'safety'. The skill says validate at boundaries, trust internally -- don't re-validate the same data at every layer.",
+      "assertions": [
+        {
+          "id": "26.1",
+          "text": "Recommends validating at the HTTP handler layer (the system boundary)"
+        },
+        {
+          "id": "26.2",
+          "text": "Recommends that the service and repository layers trust the data is already valid"
+        },
+        {
+          "id": "26.3",
+          "text": "Explains WHY: re-validating at every layer clutters code and violates DRY"
+        },
+        {
+          "id": "26.4",
+          "text": "Does NOT suggest adding the same validation checks in all three layers"
+        },
+        {
+          "id": "26.5",
+          "text": "May distinguish between input validation (at boundary) and business rule validation (in domain)"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "name": "explicit-over-implicit-defaults",
+      "description": "Tests whether the model favors explicit defaults in code over implicit magic (struct tags, reflection)",
+      "prompt": "I want to provide default values for my Go configuration struct. I'm thinking of using struct tags like `default:\"8080\"` with a reflection-based library. Is this a good approach in Go?",
+      "trap": "Without the skill, the model may endorse the struct-tag default approach as convenient. The skill says Go favors explicitness -- explicit defaults visible in code over implicit behavior hidden in struct tags and reflection.",
+      "assertions": [
+        {
+          "id": "27.1",
+          "text": "Recommends against using struct tags + reflection for defaults"
+        },
+        {
+          "id": "27.2",
+          "text": "Suggests explicit defaults in a constructor function (e.g. NewConfig())"
+        },
+        {
+          "id": "27.3",
+          "text": "Explains WHY: Go favors explicitness, struct tags hide behavior that readers cannot see without knowing the library"
+        },
+        {
+          "id": "27.4",
+          "text": "Shows a constructor that returns a Config with default values set explicitly"
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "name": "retry-context-check",
+      "description": "Tests whether retry logic checks context cancellation between attempts",
+      "prompt": "Write a Go retry function that retries a given operation up to 5 times with exponential backoff. The function should be production-ready.",
+      "trap": "Without the skill, the model may implement retry without checking ctx.Err() between attempts. The skill says retry logic MUST check context cancellation between attempts.",
+      "assertions": [
+        {
+          "id": "28.1",
+          "text": "Function accepts a context.Context parameter"
+        },
+        {
+          "id": "28.2",
+          "text": "Checks ctx.Err() or ctx.Done() between retry attempts"
+        },
+        {
+          "id": "28.3",
+          "text": "Uses select with ctx.Done() for the backoff delay (not time.Sleep)"
+        },
+        {
+          "id": "28.4",
+          "text": "Implements exponential backoff"
+        },
+        {
+          "id": "28.5",
+          "text": "Returns the context error if the context is cancelled during retry"
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "name": "ddd-value-object-money",
+      "description": "Tests whether the model implements money as a value object with cents (not float) and currency validation",
+      "prompt": "I'm implementing a pricing system in Go using DDD. I need to represent monetary amounts that support addition and comparison. Design the money type.",
+      "trap": "Without the skill, the model may use float64 for money (precision issues) or make it mutable. The skill shows Money as an immutable value object using int64 cents.",
+      "assertions": [
+        {
+          "id": "29.1",
+          "text": "Uses int64 (cents) not float64 for the amount -- avoids floating point precision issues"
+        },
+        {
+          "id": "29.2",
+          "text": "Includes a currency field"
+        },
+        {
+          "id": "29.3",
+          "text": "Fields are unexported (immutable value object, can only be created via constructor)"
+        },
+        {
+          "id": "29.4",
+          "text": "Add method validates currency match before addition"
+        },
+        {
+          "id": "29.5",
+          "text": "Constructor validates input (e.g. currency is required)"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "name": "constructor-injection-not-globals",
+      "description": "Tests that dependencies are injected via constructors, not global variables or init()",
+      "prompt": "I have a UserService that needs a database connection and a logger. What's the best way to set this up in Go? I was thinking of using a package-level var for the database.",
+      "trap": "Without the skill, the model may accept the global variable approach or use init() for setup. The skill explicitly forbids globals and init() for service setup.",
+      "assertions": [
+        {
+          "id": "30.1",
+          "text": "Uses constructor injection (NewUserService taking dependencies as parameters)"
+        },
+        {
+          "id": "30.2",
+          "text": "Explicitly advises against package-level variables for service dependencies"
+        },
+        {
+          "id": "30.3",
+          "text": "Explains why globals are problematic (untestable, hidden dependencies, or coupling)"
+        },
+        {
+          "id": "30.4",
+          "text": "Does NOT use init() for service initialization"
+        },
+        {
+          "id": "30.5",
+          "text": "Returns a concrete struct pointer from the constructor, not an interface"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "name": "interface-defined-at-consumer",
+      "description": "Tests that interfaces are defined where consumed, not where implemented",
+      "prompt": "I'm building a Go service that uses a UserStore. Should I define the UserStore interface in the same package as the PostgreSQL implementation or somewhere else? Show me the correct pattern.",
+      "trap": "Without the skill, the model often defines the interface in the implementation package (next to the struct). The skill requires interfaces to be defined at the consumption site.",
+      "assertions": [
+        {
+          "id": "31.1",
+          "text": "Defines the interface in the consuming package (e.g. service package), not the implementation package"
+        },
+        {
+          "id": "31.2",
+          "text": "Explains the principle: accept interfaces, return structs"
+        },
+        {
+          "id": "31.3",
+          "text": "The implementation package returns a concrete struct pointer"
+        },
+        {
+          "id": "31.4",
+          "text": "The consumer depends on its own locally-defined interface"
+        },
+        {
+          "id": "31.5",
+          "text": "Does NOT have the implementation package import the consumer's interface"
+        }
+      ]
+    },
+    {
+      "id": 32,
+      "name": "container-not-passed-as-dependency",
+      "description": "Tests that the DI container is never passed as a dependency (service locator anti-pattern)",
+      "prompt": "I'm using samber/do for DI in my Go project. My UserService needs a Database and a Mailer. Should I pass the do.Injector to UserService so it can look up what it needs?",
+      "trap": "Without the skill, the model may accept passing the injector/container as a dependency. The skill explicitly forbids this as the service locator anti-pattern.",
+      "assertions": [
+        {
+          "id": "32.1",
+          "text": "Advises against passing the injector/container as a dependency"
+        },
+        {
+          "id": "32.2",
+          "text": "Identifies this as the service locator anti-pattern"
+        },
+        {
+          "id": "32.3",
+          "text": "Shows that the Injector should only exist at the composition root (main or app startup)"
+        },
+        {
+          "id": "32.4",
+          "text": "Shows UserService receiving Database and Mailer directly as constructor parameters"
+        },
+        {
+          "id": "32.5",
+          "text": "Shows the provider function using do.MustInvoke inside the provider, not inside UserService methods"
+        }
+      ]
+    },
+    {
+      "id": 33,
+      "name": "manual-di-for-small-projects",
+      "description": "Tests that small projects use manual DI, not a library",
+      "prompt": "I'm building a small Go REST API with about 5 services: config, database, user repository, user service, and HTTP handler. What DI approach should I use?",
+      "trap": "Without the skill, the model may recommend a DI library like Fx or Dig for any project. The skill says small projects (< 10 services) should use manual constructor injection.",
+      "assertions": [
+        {
+          "id": "33.1",
+          "text": "Recommends manual constructor injection for a project with only 5 services"
+        },
+        {
+          "id": "33.2",
+          "text": "Does NOT recommend a DI library as the primary approach"
+        },
+        {
+          "id": "33.3",
+          "text": "Shows wiring in main() with explicit constructor calls in dependency order"
+        },
+        {
+          "id": "33.4",
+          "text": "Initializes infrastructure first, then repositories, then services, then transport"
+        },
+        {
+          "id": "33.5",
+          "text": "Mentions that a DI library becomes worthwhile at 10-20+ services"
+        }
+      ]
+    },
+    {
+      "id": 34,
+      "name": "di-library-selection-judgment",
+      "description": "Tests correct DI library recommendation based on project characteristics",
+      "prompt": "I'm building a large Go microservice with 40+ services, complex lifecycle management (health checks, graceful shutdown), and I want compile-time type safety. My team is comfortable with Go generics. Which DI library should I use?",
+      "trap": "Without the skill, the model may recommend uber-go/fx (most popular) or uber-go/dig despite reflection-only runtime checks. The skill's decision table shows samber/do matches all these criteria: any size, compile-time generics, built-in lifecycle, health checks, shutdown.",
+      "assertions": [
+        {
+          "id": "34.1",
+          "text": "Recommends samber/do as a strong fit given the criteria (generics, lifecycle, compile-time safety)"
+        },
+        {
+          "id": "34.2",
+          "text": "Explains why uber-go/fx is a valid alternative but uses reflection (runtime errors, not compile-time)"
+        },
+        {
+          "id": "34.3",
+          "text": "Explains why uber-go/dig uses reflection and lacks built-in lifecycle management (no health checks or shutdown hooks)"
+        },
+        {
+          "id": "34.4",
+          "text": "Mentions that samber/do requires Go 1.18+ for generics"
+        },
+        {
+          "id": "34.5",
+          "text": "Compares samber/do against uber-go/fx and uber-go/dig (or manual DI) from the decision table"
+        }
+      ]
+    },
+    {
+      "id": 35,
+      "name": "fx-lifecycle-hooks-pattern",
+      "description": "Tests proper uber-go/fx lifecycle hook usage for startup/shutdown",
+      "prompt": "Set up a database connection using uber-go/fx that connects on startup and cleanly closes on shutdown.",
+      "trap": "Without the skill, the model may open and close the connection manually instead of using fx.Lifecycle hooks. The skill requires OnStart/OnStop hooks.",
+      "assertions": [
+        {
+          "id": "35.1",
+          "text": "Uses fx.Lifecycle parameter in the provider function"
+        },
+        {
+          "id": "35.2",
+          "text": "Registers OnStart hook for establishing the database connection"
+        },
+        {
+          "id": "35.3",
+          "text": "Registers OnStop hook for closing the database connection"
+        },
+        {
+          "id": "35.4",
+          "text": "Uses lc.Append(fx.Hook{...}) pattern"
+        },
+        {
+          "id": "35.5",
+          "text": "OnStart and OnStop take context.Context as parameter"
+        }
+      ]
+    },
+    {
+      "id": 36,
+      "name": "testing-with-di-mock-injection",
+      "description": "Tests that DI enables testing by injecting mocks at the interface boundary",
+      "prompt": "Write a test for a UserService that depends on a UserStore interface. The test should verify that GetUser returns the correct user when found and an error when not found. Don't use any DI library.",
+      "trap": "Without the skill, the model may test with a real database or skip the mock pattern. The skill requires mocking at the interface boundary.",
+      "assertions": [
+        {
+          "id": "36.1",
+          "text": "Creates a mock implementation of the UserStore interface"
+        },
+        {
+          "id": "36.2",
+          "text": "Injects the mock into UserService via the constructor (NewUserService)"
+        },
+        {
+          "id": "36.3",
+          "text": "Tests both the success path (user found) and the error path (not found)"
+        },
+        {
+          "id": "36.4",
+          "text": "Does NOT use a real database connection in the test"
+        },
+        {
+          "id": "36.5",
+          "text": "The mock is defined in the test file, not as a package-level or global variable"
+        }
+      ]
+    },
+    {
+      "id": 37,
+      "name": "shallow-dependency-graph",
+      "description": "Tests that deep dependency chains are flagged as a design problem",
+      "prompt": "My Go application has this dependency chain: Config -> Database -> UserRepo -> UserService -> NotificationService -> OrderService -> PaymentService -> APIHandler. Is this a good architecture?",
+      "trap": "Without the skill, the model may accept this deep chain as normal layered architecture. The skill says deep chains signal design problems and recommends flattening.",
+      "assertions": [
+        {
+          "id": "37.1",
+          "text": "Identifies the deep dependency chain as a design problem"
+        },
+        {
+          "id": "37.2",
+          "text": "Recommends flattening the dependency graph"
+        },
+        {
+          "id": "37.3",
+          "text": "Suggests that most services should depend on repositories and config directly, not transitively through other services"
+        },
+        {
+          "id": "37.4",
+          "text": "Explains the negative consequences of deep chains (fragility, hard to test, or hard to maintain)"
+        },
+        {
+          "id": "37.5",
+          "text": "Proposes a concrete restructuring where OrderService and PaymentService don't depend on each other transitively"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "name": "one-container-per-app-not-per-request",
+      "description": "Tests that a DI container is created once per application, not per request",
+      "prompt": "I'm building a Go HTTP API with samber/do. In each HTTP handler, I'm creating a new do.New() injector, providing all services, then invoking the one I need. This way each request gets fresh services. Is this correct?",
+      "trap": "Without the skill, the model may accept the per-request container pattern as reasonable isolation. The skill explicitly forbids creating a new container per request.",
+      "assertions": [
+        {
+          "id": "38.1",
+          "text": "Identifies creating a new container per request as a mistake"
+        },
+        {
+          "id": "38.2",
+          "text": "Recommends one container per application created at startup"
+        },
+        {
+          "id": "38.3",
+          "text": "Explains the performance or correctness problem with per-request containers (recreating singletons, no connection reuse)"
+        },
+        {
+          "id": "38.4",
+          "text": "Suggests using scopes for request-level isolation if needed"
+        },
+        {
+          "id": "38.5",
+          "text": "Shows the container being created once in main() and services injected into handlers"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "name": "lazy-vs-eager-initialization",
+      "description": "Tests knowledge of lazy initialization preference and singleton vs transient distinction",
+      "prompt": "When using a DI container in Go, should all my services be created at application startup? I have a database pool, a cache client, and some request processing services.",
+      "trap": "Without the skill, the model may recommend eager initialization for everything. The skill prefers lazy initialization and distinguishes singletons for stateful services from transients for stateless ones.",
+      "assertions": [
+        {
+          "id": "39.1",
+          "text": "Recommends lazy initialization (services created on first use, not all at startup)"
+        },
+        {
+          "id": "39.2",
+          "text": "Recommends singletons for stateful services like database connections and cache clients"
+        },
+        {
+          "id": "39.3",
+          "text": "Recommends transients (or factories) for stateless request processing services"
+        },
+        {
+          "id": "39.4",
+          "text": "Explains why lazy loading is beneficial (unused services are never created, faster startup)"
+        },
+        {
+          "id": "39.5",
+          "text": "Contrasts container-managed lazy loading (samber/do, uber-go/fx) with manual constructor wiring where all services are eagerly initialized at startup"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "name": "minimal-main-and-execute",
+      "description": "Tests that main.go is minimal and only calls Execute(), with os.Exit handled in main not inside commands",
+      "prompt": "Create the entry point for a Go CLI application called 'deploy' using Cobra. The app should have a root command and a 'push' subcommand. Write main.go and root.go.",
+      "trap": "Model puts configuration logic, flag parsing, or complex setup directly in main.go instead of keeping it minimal. May also call os.Exit inside RunE instead of returning errors.",
+      "assertions": [
+        {
+          "id": "40.1",
+          "text": "main.go only calls Execute() (or rootCmd.Execute()) and os.Exit on error — no configuration, flag setup, or business logic in main()"
+        },
+        {
+          "id": "40.2",
+          "text": "The root command sets SilenceUsage: true to prevent printing full usage text on every error"
+        },
+        {
+          "id": "40.3",
+          "text": "The root command sets SilenceErrors: true to control error output format"
+        },
+        {
+          "id": "40.4",
+          "text": "Subcommands do NOT call os.Exit() inside RunE — they return errors and let main() decide the exit code"
+        },
+        {
+          "id": "40.5",
+          "text": "The push subcommand is registered via rootCmd.AddCommand() in an init() function or setup function"
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "name": "viper-config-layering",
+      "description": "Tests proper Viper configuration precedence: flags > env > config file > defaults, with env prefix and config-file-not-required",
+      "prompt": "I'm building a Go CLI server tool with Cobra. It needs a --port flag (default 3000) that can also be set via the MYSERVER_PORT env var or a config file at ~/.myserver.yaml. Write the configuration setup code.",
+      "trap": "Model doesn't bind flags to Viper (so flags and env/config are disconnected), forgets SetEnvPrefix (causing env var collisions), or crashes when no config file exists instead of ignoring ConfigFileNotFoundError.",
+      "assertions": [
+        {
+          "id": "41.1",
+          "text": "Calls viper.BindPFlag to bind the port flag to Viper, ensuring viper.GetInt('port') returns the flag value when set"
+        },
+        {
+          "id": "41.2",
+          "text": "Sets an env prefix with viper.SetEnvPrefix('MYSERVER' or similar) to namespace env vars and avoid collisions"
+        },
+        {
+          "id": "41.3",
+          "text": "Calls viper.AutomaticEnv() to enable automatic env var binding"
+        },
+        {
+          "id": "41.4",
+          "text": "Handles viper.ConfigFileNotFoundError gracefully (ignores it) — config file is optional, not crashing when absent"
+        },
+        {
+          "id": "41.5",
+          "text": "The precedence order is correct: CLI flags > environment variables > config file > defaults"
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "name": "persistent-pre-run-config-init",
+      "description": "Tests that configuration initialization happens in PersistentPreRunE on the root command",
+      "prompt": "My Go CLI has a root command and three subcommands (serve, migrate, status). All of them need access to a database DSN from config. Where should I initialize the configuration so all subcommands have access? Write the code.",
+      "trap": "Model initializes config inside each subcommand's RunE (duplicating logic), or uses a global init() function instead of PersistentPreRunE, or puts it in cobra.OnInitialize without connecting it to the command tree properly.",
+      "assertions": [
+        {
+          "id": "42.1",
+          "text": "Configuration initialization happens in PersistentPreRunE on the root command — this ensures it runs before every subcommand"
+        },
+        {
+          "id": "42.2",
+          "text": "Config init is NOT duplicated inside each subcommand's RunE — it happens once in the root"
+        },
+        {
+          "id": "42.3",
+          "text": "The --config flag (or equivalent) is a persistent flag on the root command so all subcommands inherit it"
+        },
+        {
+          "id": "42.4",
+          "text": "Environment variables use a replacer (SetEnvKeyReplacer) to handle hyphens-to-underscores mapping (e.g., log-level becomes LOG_LEVEL)"
+        },
+        {
+          "id": "42.5",
+          "text": "Logging is configured to write to stderr, not stdout"
+        }
+      ]
+    },
+    {
+      "id": 43,
+      "name": "stdout-vs-stderr-separation",
+      "description": "Tests that program output goes to stdout and diagnostics/errors/logs go to stderr",
+      "prompt": "Write a Go CLI command 'list-users' using Cobra that fetches users from a database and prints them. It should log progress messages, handle errors, and support being piped to other commands (e.g., `myapp list-users | grep admin`). Write the RunE function.",
+      "trap": "Model writes log messages, error messages, or progress indicators to stdout (using fmt.Println) instead of stderr, which would corrupt piped output. May also use os.Stdout directly instead of cmd.OutOrStdout().",
+      "assertions": [
+        {
+          "id": "43.1",
+          "text": "Program output (the user list) goes to stdout via cmd.OutOrStdout() or fmt.Fprint(cmd.OutOrStdout(), ...) — NOT os.Stdout directly"
+        },
+        {
+          "id": "43.2",
+          "text": "Log messages, progress indicators, or diagnostic output go to stderr (via slog, log, or fmt.Fprint(os.Stderr, ...)) — NOT stdout"
+        },
+        {
+          "id": "43.3",
+          "text": "Error messages go to stderr (via cmd.ErrOrStderr() or os.Stderr), not mixed with program output on stdout"
+        },
+        {
+          "id": "43.4",
+          "text": "Uses cmd.OutOrStdout() instead of os.Stdout directly, enabling test capture"
+        },
+        {
+          "id": "43.5",
+          "text": "The function returns an error from RunE rather than calling os.Exit() or log.Fatal() on failure"
+        }
+      ]
+    },
+    {
+      "id": 44,
+      "name": "version-ldflags-injection",
+      "description": "Tests that version info is injected at build time via ldflags, not hardcoded",
+      "prompt": "Add a 'version' command to my Go CLI app that shows the version, git commit, and build date. How should I handle the version string?",
+      "trap": "Model hardcodes the version string as a constant (const version = \"1.0.0\") instead of using ldflags injection. May also not include the build command example.",
+      "assertions": [
+        {
+          "id": "44.1",
+          "text": "Version, commit, and date are package-level variables (var, not const) with placeholder defaults like 'dev' or 'unknown'"
+        },
+        {
+          "id": "44.2",
+          "text": "Shows or explains the -ldflags '-X ...' build command for injecting values at compile time"
+        },
+        {
+          "id": "44.3",
+          "text": "The version command uses cmd.OutOrStdout() for output, not fmt.Println or os.Stdout directly"
+        },
+        {
+          "id": "44.4",
+          "text": "Version is NOT hardcoded as a const string that would get out of sync with git tags"
+        },
+        {
+          "id": "44.5",
+          "text": "Optionally includes runtime/debug.ReadBuildInfo() as a fallback or supplement for Go module version info"
+        }
+      ]
+    },
+    {
+      "id": 45,
+      "name": "exit-code-conventions",
+      "description": "Tests proper Unix exit code mapping — 0 for success, 1 for general error, 2 for usage errors",
+      "prompt": "My Go CLI tool needs to report different exit codes for different failure types: invalid arguments, missing config file, network timeout, and successful completion. Write the error handling and exit code logic in main.go.",
+      "trap": "Model uses the same exit code (1) for all errors, or calls os.Exit deep inside command handlers instead of in main(). May also use non-standard exit codes.",
+      "assertions": [
+        {
+          "id": "45.1",
+          "text": "Exit code 0 for success, exit code 1 for general runtime errors, exit code 2 for usage/argument errors — follows Unix conventions"
+        },
+        {
+          "id": "45.2",
+          "text": "os.Exit() is called only in main(), not inside RunE functions or command handlers"
+        },
+        {
+          "id": "45.3",
+          "text": "Uses a typed error or error wrapping pattern (like ExitError with a Code field) to propagate exit codes from commands to main"
+        },
+        {
+          "id": "45.4",
+          "text": "Errors are returned from commands, not swallowed with os.Exit() calls that skip deferred cleanup"
+        },
+        {
+          "id": "45.5",
+          "text": "Different error categories map to different exit codes, not all errors producing exit code 1"
+        }
+      ]
+    },
+    {
+      "id": 46,
+      "name": "signal-handling-with-context",
+      "description": "Tests that signal handling uses signal.NotifyContext for context-based cancellation",
+      "prompt": "My Go CLI has a long-running 'serve' command that starts an HTTP server. I need graceful shutdown when the user presses Ctrl+C. Write the signal handling code.",
+      "trap": "Model uses a raw signal channel with signal.Notify instead of signal.NotifyContext, missing context propagation. May also not handle the shutdown timeout or forget SIGTERM.",
+      "assertions": [
+        {
+          "id": "46.1",
+          "text": "Uses signal.NotifyContext to propagate cancellation through context — NOT a raw channel with signal.Notify and manual select"
+        },
+        {
+          "id": "46.2",
+          "text": "Handles both os.Interrupt (Ctrl+C / SIGINT) and syscall.SIGTERM (container orchestrators)"
+        },
+        {
+          "id": "46.3",
+          "text": "Creates a shutdown timeout context (e.g., 10-30 seconds) for graceful shutdown, not blocking indefinitely"
+        },
+        {
+          "id": "46.4",
+          "text": "Calls srv.Shutdown(ctx) for graceful HTTP server shutdown, not srv.Close() which drops in-flight requests"
+        },
+        {
+          "id": "46.5",
+          "text": "Distinguishes http.ErrServerClosed (normal shutdown) from unexpected server errors"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "name": "flag-binding-and-constraints",
+      "description": "Tests flag patterns: persistent vs local, required flags, mutual exclusion, and Viper binding",
+      "prompt": "My Go CLI 'deploy' command needs these flags:\n- --env (required, must be one of: dev, staging, prod)\n- --tag (required, the docker image tag)\n- --dry-run and --force (mutually exclusive)\n- --verbose (available on all commands, not just deploy)\n\nWrite the flag setup code using Cobra.",
+      "trap": "Model makes --verbose a local flag instead of persistent, doesn't use MarkFlagsMutuallyExclusive for dry-run/force, or forgets to bind flags to Viper.",
+      "assertions": [
+        {
+          "id": "47.1",
+          "text": "--verbose is a persistent flag (PersistentFlags) on the root command, not a local flag on deploy — it needs to be available on all commands"
+        },
+        {
+          "id": "47.2",
+          "text": "Uses MarkFlagRequired for --env and --tag flags"
+        },
+        {
+          "id": "47.3",
+          "text": "Uses MarkFlagsMutuallyExclusive for --dry-run and --force"
+        },
+        {
+          "id": "47.4",
+          "text": "Uses RegisterFlagCompletionFunc to provide completion values for --env (dev, staging, prod)"
+        },
+        {
+          "id": "47.5",
+          "text": "Binds configurable flags to Viper with viper.BindPFlag so they can be set via env vars or config file"
+        }
+      ]
+    },
+    {
+      "id": 48,
+      "name": "argument-validation",
+      "description": "Tests use of Cobra's built-in argument validators instead of manual validation in RunE",
+      "prompt": "I have three Cobra commands:\n1. 'status' — takes no arguments\n2. 'deploy' — takes exactly one argument (the service name)\n3. 'scale' — takes 2-3 arguments (service, replica count, optional region)\n\nHow should I validate the arguments for each command?",
+      "trap": "Model manually validates len(args) inside RunE instead of using Cobra's declarative validators (cobra.NoArgs, cobra.ExactArgs, cobra.RangeArgs). May also use custom validation where built-in validators suffice.",
+      "assertions": [
+        {
+          "id": "48.1",
+          "text": "Uses cobra.NoArgs for the status command — not manual len(args) == 0 check"
+        },
+        {
+          "id": "48.2",
+          "text": "Uses cobra.ExactArgs(1) for the deploy command — not manual len(args) != 1 check"
+        },
+        {
+          "id": "48.3",
+          "text": "Uses cobra.RangeArgs(2, 3) for the scale command — not manual len(args) < 2 || len(args) > 3 check"
+        },
+        {
+          "id": "48.4",
+          "text": "Validators are set on the Args field of the command struct, not implemented inside RunE"
+        }
+      ]
+    },
+    {
+      "id": 49,
+      "name": "cli-testing-pattern",
+      "description": "Tests that CLI commands are tested by executing programmatically with captured output",
+      "prompt": "Write tests for a Cobra CLI command 'greet' that takes a --name flag and prints a greeting. Test the default behavior and a custom name. Show the test helper and test function.",
+      "trap": "Model tests by running os.exec on the compiled binary instead of executing commands programmatically. May also not capture output via cmd.SetOut/cmd.SetErr buffers.",
+      "assertions": [
+        {
+          "id": "49.1",
+          "text": "Creates an executeCommand helper that sets up a buffer, calls cmd.SetOut(buf) and cmd.SetErr(buf), sets args, and executes"
+        },
+        {
+          "id": "49.2",
+          "text": "Tests are table-driven with multiple cases (at least default and custom name)"
+        },
+        {
+          "id": "49.3",
+          "text": "Uses cmd.SetArgs() to pass arguments programmatically — not os/exec.Command"
+        },
+        {
+          "id": "49.4",
+          "text": "Captures output via a bytes.Buffer set on the command — not by redirecting os.Stdout"
+        },
+        {
+          "id": "49.5",
+          "text": "Tests check both the output string and the error return value"
+        }
+      ]
+    },
+    {
+      "id": 50,
+      "name": "machine-readable-output-format",
+      "description": "Tests support for --output flag with multiple formats (json/table/plain) for scriptability",
+      "prompt": "My Go CLI command 'list-services' shows running services. I need it to support both human-readable and machine-parseable output for scripting. What's the best approach?",
+      "trap": "Model only supports a single output format, or adds a --json boolean flag instead of a flexible --output format flag. May also not use tabwriter for table output.",
+      "assertions": [
+        {
+          "id": "50.1",
+          "text": "Supports an --output flag with at least json and table formats (not just a --json boolean toggle)"
+        },
+        {
+          "id": "50.2",
+          "text": "JSON output uses encoding/json encoder writing to cmd.OutOrStdout()"
+        },
+        {
+          "id": "50.3",
+          "text": "Table output uses text/tabwriter or similar for aligned columns — not ad-hoc spacing"
+        },
+        {
+          "id": "50.4",
+          "text": "The default format is human-readable (table), with JSON/plain as opt-in machine formats"
+        }
+      ]
+    },
+    {
+      "id": 51,
+      "name": "shell-completion-setup",
+      "description": "Tests proper shell completion command and custom completions for flags",
+      "prompt": "Add shell completion support to my Go CLI built with Cobra. I want users to be able to run 'myapp completion bash' to generate a completion script. Also, the --env flag should suggest 'dev', 'staging', 'prod' during tab completion.",
+      "trap": "Model implements completion from scratch instead of using Cobra's built-in generators. May forget the ValidArgs field or RegisterFlagCompletionFunc for custom completions.",
+      "assertions": [
+        {
+          "id": "51.1",
+          "text": "Creates a 'completion' subcommand that supports bash, zsh, fish, and powershell as arguments"
+        },
+        {
+          "id": "51.2",
+          "text": "Uses Cobra's built-in completion generators (GenBashCompletionV2, GenZshCompletion, GenFishCompletion, GenPowerShellCompletionWithDesc) — not custom completion scripts"
+        },
+        {
+          "id": "51.3",
+          "text": "Uses RegisterFlagCompletionFunc for the --env flag to suggest dev/staging/prod values"
+        },
+        {
+          "id": "51.4",
+          "text": "Uses cobra.ExactValidArgs or ValidArgs to validate completion arguments for the completion command itself"
+        },
+        {
+          "id": "51.5",
+          "text": "Returns cobra.ShellCompDirectiveNoFileComp for flags that don't accept file paths"
+        }
+      ]
+    }
+  ]
+}
