@@ -6,7 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"os"
 	"testing"
 	"time"
@@ -28,7 +28,7 @@ func integrationCtx(t *testing.T) (context.Context, context.CancelFunc) {
 }
 
 func randomName(prefix string) string {
-	return fmt.Sprintf("%s-%d-%d", prefix, time.Now().UnixNano(), rand.Intn(1_000_000))
+	return fmt.Sprintf("%s-%d-%d", prefix, time.Now().UnixNano(), rand.IntN(1_000_000))
 }
 
 func TestIntegrationVolumeLifecycle(t *testing.T) {
@@ -42,10 +42,12 @@ func TestIntegrationVolumeLifecycle(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = v.Delete(context.Background())
+		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanCancel()
+		_ = v.Delete(cleanCtx)
 	})
 	if v.ID == "" || v.Token() == "" {
-		t.Fatalf("Create returned empty id/token: %+v", v)
+		t.Fatalf("Create returned empty id/token: id=%q hasToken=%v", v.ID, v.Token() != "")
 	}
 
 	// Write + read round-trip.
@@ -65,9 +67,6 @@ func TestIntegrationVolumeLifecycle(t *testing.T) {
 		t.Fatalf("MakeDir: %v", err)
 	}
 
-	// TODO: verify via Volume.List(path) once that method is added to the
-	// public API (volume.go currently has no path-listing helper).
-
 	if err := v.Remove(ctx, "/file.txt"); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
@@ -83,7 +82,11 @@ func TestIntegrationVolumeConnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	t.Cleanup(func() { _ = v.Delete(context.Background()) })
+	t.Cleanup(func() {
+		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanCancel()
+		_ = v.Delete(cleanCtx)
+	})
 
 	// Re-attach via Connect using the returned token.
 	other, err := volume.Connect(ctx, v.ID, v.Token(), volume.Options{Config: e2b.Config{}})

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/eric642/e2b-go-sdk"
@@ -92,7 +93,10 @@ func (c *Client) Create(ctx context.Context, name string) (*Volume, error) {
 	if err != nil {
 		return nil, wrapErr("create volume", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		drainBody(resp.Body)
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 300 {
 		return nil, volumeControlErr("create volume", resp)
 	}
@@ -120,6 +124,9 @@ func (c *Client) Connect(ctx context.Context, volumeID string) (*Volume, error) 
 // without making a control-plane HTTP round-trip. An optional BYOC domain
 // overrides Config.Domain when routing volume-content requests.
 func (c *Client) ConnectWithToken(volumeID, token string, domain ...string) (*Volume, error) {
+	if err := validateVolumeID("connect volume", volumeID); err != nil {
+		return nil, err
+	}
 	var volDomain string
 	if len(domain) > 0 {
 		volDomain = domain[0]
@@ -145,7 +152,10 @@ func (c *Client) List(ctx context.Context) ([]Info, error) {
 	if err != nil {
 		return nil, wrapErr("list volumes", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		drainBody(resp.Body)
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 300 {
 		return nil, volumeControlErr("list volumes", resp)
 	}
@@ -170,11 +180,17 @@ func (c *Client) Destroy(ctx context.Context, volumeID string) (bool, error) {
 }
 
 func getVolumeInfo(ctx context.Context, apiCli *apiclient.Client, volumeID string) (*Info, error) {
+	if err := validateVolumeID("get volume", volumeID); err != nil {
+		return nil, err
+	}
 	resp, err := apiCli.GetVolumesVolumeID(ctx, volumeID)
 	if err != nil {
 		return nil, wrapErr("get volume", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		drainBody(resp.Body)
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 300 {
 		return nil, volumeControlErr("get volume", resp)
 	}
@@ -191,12 +207,15 @@ func getVolumeInfo(ctx context.Context, apiCli *apiclient.Client, volumeID strin
 }
 
 func destroyVolume(ctx context.Context, apiCli *apiclient.Client, volumeID string) (bool, error) {
+	if err := validateVolumeID("destroy volume", volumeID); err != nil {
+		return false, err
+	}
 	resp, err := apiCli.DeleteVolumesVolumeID(ctx, volumeID)
 	if err != nil {
 		return false, wrapErr("destroy volume", err)
 	}
 	defer func() {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		drainBody(resp.Body)
 		_ = resp.Body.Close()
 	}()
 	if resp.StatusCode == http.StatusNotFound {
@@ -318,25 +337,62 @@ func (c *Client) contentBaseURL(volumeDomain string) string {
 	return "https://api." + d
 }
 
+func volumeContentHeaders(cfgHeaders map[string]string) map[string]string {
+	var ua string
+	for k, v := range cfgHeaders {
+		if !strings.EqualFold(k, "User-Agent") || v == "" {
+			continue
+		}
+		if k == "User-Agent" {
+			ua = v
+			break
+		}
+		if ua == "" {
+			ua = v
+		}
+	}
+	if ua == "" {
+		return nil
+	}
+	return map[string]string{"User-Agent": ua}
+}
+
+func validateVolumeID(op, volumeID string) error {
+	switch volumeID {
+	case "", ".", "..":
+		return &e2b.VolumeError{
+			Message: op,
+			Cause:   &e2b.InvalidArgumentError{Message: `volumeID must not be empty, ".", or ".."`},
+		}
+	}
+	return nil
+}
+
+func drainBody(body io.Reader) {
+	if body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, 4096))
+}
+
 func (c *Client) newVolume(id, name, token, volumeDomain string) (*Volume, error) {
 	effDomain := volumeDomain
 	if effDomain == "" {
 		effDomain = c.cfg.Domain
 	}
 	baseURL := c.contentBaseURL(volumeDomain)
-	volCli, err := transport.NewVolumeAPIClient(baseURL, c.dataCli, token, c.cfg.Headers)
+	volCli, err := transport.NewVolumeAPIClient(baseURL, c.dataCli, token, volumeContentHeaders(c.cfg.Headers))
 	if err != nil {
 		return nil, &e2b.VolumeError{Message: "init volume content client", Cause: err}
 	}
 	return &Volume{
-		ID:      id,
-		Name:    name,
-		Domain:  effDomain,
-		token:   token,
-		cfg:     c.cfg,
-		apiCli:  c.apiCli,
-		volCli:  volCli,
-		httpCli: c.dataCli,
+		ID:     id,
+		Name:   name,
+		Domain: effDomain,
+		token:  token,
+		cfg:    c.cfg,
+		apiCli: c.apiCli,
+		volCli: volCli,
 	}, nil
 }
 
@@ -348,12 +404,13 @@ func derefString(s *string) string {
 }
 
 type statusCoder interface {
+	error
 	HTTPStatus() int
 	ErrorCode() string
 }
 
 func extractBaseError(err error, fallbackStatus int) e2b.BaseError {
-	if sc, ok := err.(statusCoder); ok {
+	if sc, ok := errors.AsType[statusCoder](err); ok {
 		status := sc.HTTPStatus()
 		if status == 0 {
 			status = fallbackStatus

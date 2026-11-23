@@ -13,7 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net/http"
+	"math"
 	"time"
 
 	"github.com/eric642/e2b-go-sdk"
@@ -85,10 +85,9 @@ type Volume struct {
 	Domain string
 	token  string
 
-	cfg     e2b.Config
-	apiCli  *apiclient.Client
-	volCli  *volumeapi.Client
-	httpCli *http.Client
+	cfg    e2b.Config
+	apiCli *apiclient.Client
+	volCli *volumeapi.Client
 }
 
 // Token returns the per-volume JWT bearer token authenticating content calls.
@@ -131,6 +130,9 @@ func (v *Volume) Delete(ctx context.Context) error {
 // Endpoint: GET /volumecontent/{volumeID}/path
 // Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
 func (v *Volume) Stat(ctx context.Context, path string) (*EntryStat, error) {
+	if err := validateVolumePath("stat path", v.ID, path); err != nil {
+		return nil, err
+	}
 	reqCtx, cancel := v.unaryContext(ctx)
 	if cancel != nil {
 		defer cancel()
@@ -142,7 +144,10 @@ func (v *Volume) Stat(ctx context.Context, path string) (*EntryStat, error) {
 	if err != nil {
 		return nil, wrapErr("stat path", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		drainBody(resp.Body)
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 300 {
 		return nil, volumeContentErr("stat path", resp, path)
 	}
@@ -171,6 +176,9 @@ func (v *Volume) Exists(ctx context.Context, path string) (bool, error) {
 // Endpoint: PATCH /volumecontent/{volumeID}/path
 // Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
 func (v *Volume) UpdateMetadata(ctx context.Context, path string, opts MetadataOptions) (*EntryStat, error) {
+	if err := validateVolumePath("update metadata", v.ID, path); err != nil {
+		return nil, err
+	}
 	reqCtx, cancel := v.unaryContext(ctx)
 	if cancel != nil {
 		defer cancel()
@@ -188,7 +196,10 @@ func (v *Volume) UpdateMetadata(ctx context.Context, path string, opts MetadataO
 	if err != nil {
 		return nil, wrapErr("update metadata", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		drainBody(resp.Body)
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 300 {
 		return nil, volumeContentErr("update metadata", resp, path)
 	}
@@ -201,10 +212,13 @@ func (v *Volume) UpdateMetadata(ctx context.Context, path string, opts MetadataO
 // Endpoint: GET /volumecontent/{volumeID}/dir
 // Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
 func (v *Volume) List(ctx context.Context, path string, opts ...ListOptions) ([]EntryStat, error) {
+	if err := validateVolumePath("list directory", v.ID, path); err != nil {
+		return nil, err
+	}
 	params := &volumeapi.GetVolumecontentVolumeIDDirParams{Path: path}
 	if len(opts) > 0 {
-		if opts[0].Depth < 0 {
-			inv := &e2b.InvalidArgumentError{Message: "depth must be non-negative"}
+		if opts[0].Depth < 0 || int64(opts[0].Depth) > math.MaxUint32 {
+			inv := &e2b.InvalidArgumentError{Message: "depth must be between 0 and math.MaxUint32"}
 			return nil, &e2b.VolumeError{Message: "list directory", Cause: inv}
 		}
 		if opts[0].Depth > 0 {
@@ -220,7 +234,10 @@ func (v *Volume) List(ctx context.Context, path string, opts ...ListOptions) ([]
 	if err != nil {
 		return nil, wrapErr("list directory", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		drainBody(resp.Body)
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 300 {
 		return nil, volumeContentErr("list directory", resp, path)
 	}
@@ -256,6 +273,9 @@ func (v *Volume) MakeDir(ctx context.Context, path string) error {
 // Endpoint: POST /volumecontent/{volumeID}/dir
 // Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
 func (v *Volume) MakeDirWithOptions(ctx context.Context, path string, opts MakeDirOptions) (*EntryStat, error) {
+	if err := validateVolumePath("make directory", v.ID, path); err != nil {
+		return nil, err
+	}
 	reqCtx, cancel := v.unaryContext(ctx)
 	if cancel != nil {
 		defer cancel()
@@ -275,7 +295,10 @@ func (v *Volume) MakeDirWithOptions(ctx context.Context, path string, opts MakeD
 	if err != nil {
 		return nil, wrapErr("make directory", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		drainBody(resp.Body)
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 300 {
 		return nil, volumeContentErr("make directory", resp, path)
 	}
@@ -287,6 +310,9 @@ func (v *Volume) MakeDirWithOptions(ctx context.Context, path string, opts MakeD
 // Endpoint: DELETE /volumecontent/{volumeID}/path
 // Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
 func (v *Volume) Remove(ctx context.Context, path string) error {
+	if err := validateVolumePath("remove path", v.ID, path); err != nil {
+		return err
+	}
 	reqCtx, cancel := v.unaryContext(ctx)
 	if cancel != nil {
 		defer cancel()
@@ -298,7 +324,10 @@ func (v *Volume) Remove(ctx context.Context, path string) error {
 	if err != nil {
 		return wrapErr("remove path", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		drainBody(resp.Body)
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 300 {
 		return volumeContentErr("remove path", resp, path)
 	}
@@ -315,7 +344,7 @@ func (v *Volume) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	data, err := io.ReadAll(rc)
 	if err != nil {
 		return nil, wrapErr("read file", err)
@@ -343,6 +372,9 @@ func (v *Volume) ReadFileString(ctx context.Context, path string) (string, error
 // Endpoint: GET /volumecontent/{volumeID}/file
 // Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
 func (v *Volume) ReadFileStream(ctx context.Context, path string) (io.ReadCloser, error) {
+	if err := validateVolumePath("read file", v.ID, path); err != nil {
+		return nil, err
+	}
 	reqCtx, cancel := v.transferContext(ctx)
 	resp, err := v.volCli.GetVolumecontentVolumeIDFile(
 		reqCtx, v.ID,
@@ -396,6 +428,9 @@ func (v *Volume) WriteFileWithOptions(ctx context.Context, path string, content 
 // Endpoint: PUT /volumecontent/{volumeID}/file
 // Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in runtime < 2026.07).
 func (v *Volume) WriteFileStream(ctx context.Context, path string, r io.Reader, opts ...WriteOptions) (*EntryStat, error) {
+	if err := validateVolumePath("write file", v.ID, path); err != nil {
+		return nil, err
+	}
 	reqCtx, cancel := v.transferContext(ctx)
 	if cancel != nil {
 		defer cancel()
@@ -416,11 +451,27 @@ func (v *Volume) WriteFileStream(ctx context.Context, path string, r io.Reader, 
 	if err != nil {
 		return nil, wrapErr("write file", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		drainBody(resp.Body)
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 300 {
 		return nil, volumeContentErr("write file", resp, path)
 	}
 	return decodeEntryStat("write file", resp.Body, path)
+}
+
+func validateVolumePath(op, volumeID, path string) error {
+	if err := validateVolumeID(op, volumeID); err != nil {
+		return err
+	}
+	if path == "" {
+		return &e2b.VolumeError{
+			Message: op,
+			Cause:   &e2b.InvalidArgumentError{Message: "path must not be empty"},
+		}
+	}
+	return nil
 }
 
 func (v *Volume) unaryContext(ctx context.Context) (context.Context, context.CancelFunc) {

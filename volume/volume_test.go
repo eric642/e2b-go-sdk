@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -950,5 +951,475 @@ func TestVolumeErrorMappingClassifications(t *testing.T) {
 	_, err = v.Stat(cancelledCtx, "/any")
 	if _, ok := errors.AsType[*e2b.TimeoutError](err); !ok || !errors.Is(err, context.Canceled) {
 		t.Fatalf("want TimeoutError wrapping context.Canceled, got %T: %v", err, err)
+	}
+}
+
+func TestVolumeContentHeaderIsolationCloudAndBYOC(t *testing.T) {
+	var (
+		cpHeaders      []http.Header
+		contentHeaders []http.Header
+		contentHosts   []string
+	)
+
+	hc := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/volumes":
+				cpHeaders = append(cpHeaders, r.Header.Clone())
+				body, _ := json.Marshal(map[string]any{
+					"volumeID": "vol-cloud",
+					"name":     "cloud-vol",
+					"token":    "jwt-cloud",
+				})
+				return &http.Response{
+					StatusCode: http.StatusCreated,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(bytes.NewReader(body)),
+				}, nil
+
+			case r.Method == http.MethodGet && r.URL.Path == "/volumes/vol-byoc":
+				cpHeaders = append(cpHeaders, r.Header.Clone())
+				body, _ := json.Marshal(map[string]any{
+					"volumeID": "vol-byoc",
+					"name":     "byoc-vol",
+					"token":    "jwt-byoc",
+					"domain":   "us-east.byoc.example.internal",
+				})
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(bytes.NewReader(body)),
+				}, nil
+
+			case strings.HasPrefix(r.URL.Path, "/volumecontent/"):
+				contentHeaders = append(contentHeaders, r.Header.Clone())
+				contentHosts = append(contentHosts, r.URL.Host)
+				body, _ := json.Marshal(map[string]any{
+					"name":  "data",
+					"type":  "directory",
+					"path":  "/",
+					"size":  0,
+					"mode":  0o755,
+					"uid":   0,
+					"gid":   0,
+					"atime": "2026-01-01T00:00:00Z",
+					"mtime": "2026-01-01T00:00:00Z",
+					"ctime": "2026-01-01T00:00:00Z",
+				})
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(bytes.NewReader(body)),
+				}, nil
+			}
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+			return nil, nil
+		}),
+	}
+
+	cli, err := volume.NewClient(e2b.Config{
+		AccessToken: "cp-access-token",
+		Domain:      "cloud.e2b.test",
+		HTTPClient:  hc,
+		Retries:     new(0),
+		Headers: map[string]string{
+			"X-Control-Custom": "cp-secret-header",
+			"X-API-Key":        "cp-custom-api-key",
+			"X-Access-Token":   "envd-secret",
+			"User-Agent":       "custom-volume-sdk/1.2.3",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	cloudVol, err := cli.Create(context.Background(), "cloud-vol")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := cloudVol.Stat(context.Background(), "/"); err != nil {
+		t.Fatalf("cloud Stat: %v", err)
+	}
+
+	byocVol, err := cli.Connect(context.Background(), "vol-byoc")
+	if err != nil {
+		t.Fatalf("Connect(BYOC): %v", err)
+	}
+	if _, err := byocVol.Stat(context.Background(), "/"); err != nil {
+		t.Fatalf("byoc Stat: %v", err)
+	}
+
+	if len(cpHeaders) != 2 {
+		t.Fatalf("control-plane calls = %d, want 2", len(cpHeaders))
+	}
+	for i, h := range cpHeaders {
+		if got := h.Get("X-Control-Custom"); got != "cp-secret-header" {
+			t.Errorf("cp[%d] X-Control-Custom = %q, want cp-secret-header", i, got)
+		}
+		if got := h.Get("X-API-Key"); got != "cp-custom-api-key" {
+			t.Errorf("cp[%d] X-API-Key = %q, want cp-custom-api-key", i, got)
+		}
+		if got := h.Get("User-Agent"); got != "custom-volume-sdk/1.2.3" {
+			t.Errorf("cp[%d] User-Agent = %q, want custom-volume-sdk/1.2.3", i, got)
+		}
+	}
+
+	if len(contentHeaders) != 2 {
+		t.Fatalf("content calls = %d, want 2", len(contentHeaders))
+	}
+	wantHosts := []string{"api.cloud.e2b.test", "api.us-east.byoc.example.internal"}
+	wantAuths := []string{"Bearer jwt-cloud", "Bearer jwt-byoc"}
+	for i, h := range contentHeaders {
+		if contentHosts[i] != wantHosts[i] {
+			t.Errorf("content[%d] host = %q, want %q", i, contentHosts[i], wantHosts[i])
+		}
+		if got := h.Get("Authorization"); got != wantAuths[i] {
+			t.Errorf("content[%d] Authorization = %q, want %q", i, got, wantAuths[i])
+		}
+		if got := h.Get("User-Agent"); got != "custom-volume-sdk/1.2.3" {
+			t.Errorf("content[%d] User-Agent = %q, want custom-volume-sdk/1.2.3", i, got)
+		}
+		for _, forbidden := range []string{"X-Control-Custom", "X-API-Key", "X-Access-Token"} {
+			if got := h.Get(forbidden); got != "" {
+				t.Errorf("content[%d] leaked control-plane header %s = %q", i, forbidden, got)
+			}
+		}
+	}
+
+	// Verify default User-Agent is preserved and control-plane headers are still stripped
+	// when User-Agent is not explicitly configured.
+	contentHeaders = nil
+	defaultCli, err := volume.NewClient(e2b.Config{
+		APIKey:     "cp-key",
+		Domain:     "cloud.e2b.test",
+		HTTPClient: hc,
+		Retries:    new(0),
+		Headers: map[string]string{
+			"X-Control-Custom": "must-not-leak",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient(default UA): %v", err)
+	}
+	vDef, err := defaultCli.ConnectWithToken("vol-def", "jwt-def")
+	if err != nil {
+		t.Fatalf("ConnectWithToken: %v", err)
+	}
+	if _, err := vDef.Stat(context.Background(), "/"); err != nil {
+		t.Fatalf("default UA Stat: %v", err)
+	}
+	if len(contentHeaders) != 1 {
+		t.Fatalf("default UA content calls = %d, want 1", len(contentHeaders))
+	}
+	if got := contentHeaders[0].Get("User-Agent"); !strings.HasPrefix(got, "e2b-go-sdk/") {
+		t.Errorf("default content User-Agent = %q, want e2b-go-sdk/ prefix", got)
+	}
+	if got := contentHeaders[0].Get("X-Control-Custom"); got != "" {
+		t.Errorf("default content leaked X-Control-Custom = %q", got)
+	}
+
+	// Verify case-insensitive user-agent key does not leak other headers.
+	contentHeaders = nil
+	lowerCli, err := volume.NewClient(e2b.Config{
+		APIKey:     "cp-key",
+		Domain:     "cloud.e2b.test",
+		HTTPClient: hc,
+		Retries:    new(0),
+		Headers: map[string]string{
+			"user-agent":       "lower-ua/1.0",
+			"X-Control-Custom": "must-not-leak",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient(lower UA): %v", err)
+	}
+	vLower, err := lowerCli.ConnectWithToken("vol-lower", "jwt-lower")
+	if err != nil {
+		t.Fatalf("ConnectWithToken: %v", err)
+	}
+	if _, err := vLower.Stat(context.Background(), "/"); err != nil {
+		t.Fatalf("lower UA Stat: %v", err)
+	}
+	if len(contentHeaders) != 1 {
+		t.Fatalf("lower UA content calls = %d, want 1", len(contentHeaders))
+	}
+	if got := contentHeaders[0].Get("User-Agent"); got == "" {
+		t.Errorf("lower UA content User-Agent is empty")
+	}
+	if got := contentHeaders[0].Get("X-Control-Custom"); got != "" {
+		t.Errorf("lower UA content leaked X-Control-Custom = %q", got)
+	}
+}
+
+func TestVolumeIDValidation(t *testing.T) {
+	var calls atomic.Int32
+	hc := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			t.Errorf("unexpected HTTP request for invalid volumeID: %s %s", r.Method, r.URL.String())
+			return nil, errors.New("unexpected network call")
+		}),
+	}
+	testCfg := e2b.Config{
+		APIKey:     "test-key",
+		Domain:     "example.com",
+		HTTPClient: hc,
+		Retries:    new(0),
+	}
+	cli, err := volume.NewClient(testCfg)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	opts := volume.Options{Config: testCfg}
+	ctx := context.Background()
+
+	assertInvalid := func(t *testing.T, name string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected error, got nil", name)
+		}
+		if _, ok := errors.AsType[*e2b.InvalidArgumentError](err); !ok {
+			t.Fatalf("%s: want *e2b.InvalidArgumentError, got %T: %v", name, err, err)
+		}
+		if _, ok := errors.AsType[*e2b.VolumeError](err); !ok {
+			t.Fatalf("%s: want *e2b.VolumeError, got %T: %v", name, err, err)
+		}
+	}
+
+	for _, badID := range []string{"", ".", ".."} {
+		t.Run("id="+badID, func(t *testing.T) {
+			_, err := cli.GetInfo(ctx, badID)
+			assertInvalid(t, "Client.GetInfo", err)
+
+			_, err = cli.Connect(ctx, badID)
+			assertInvalid(t, "Client.Connect", err)
+
+			_, err = cli.ConnectWithToken(badID, "tok")
+			assertInvalid(t, "Client.ConnectWithToken", err)
+
+			ok, err := cli.Destroy(ctx, badID)
+			if ok {
+				t.Fatalf("Client.Destroy(%q) = true, want false", badID)
+			}
+			assertInvalid(t, "Client.Destroy", err)
+
+			_, err = volume.GetInfo(ctx, badID, opts)
+			assertInvalid(t, "volume.GetInfo", err)
+
+			_, err = volume.Connect(ctx, badID, "tok", opts)
+			assertInvalid(t, "volume.Connect", err)
+
+			_, err = volume.ConnectByID(ctx, badID, testCfg)
+			assertInvalid(t, "volume.ConnectByID", err)
+
+			_, err = volume.ConnectWithToken(badID, "tok", opts)
+			assertInvalid(t, "volume.ConnectWithToken", err)
+
+			ok, err = volume.Destroy(ctx, badID, opts)
+			if ok {
+				t.Fatalf("volume.Destroy(%q) = true, want false", badID)
+			}
+			assertInvalid(t, "volume.Destroy", err)
+
+			v, err := cli.ConnectWithToken("valid-vol", "tok")
+			if err != nil {
+				t.Fatalf("ConnectWithToken(valid): %v", err)
+			}
+			v.ID = badID
+			_, err = v.GetInfo(ctx)
+			assertInvalid(t, "Volume.GetInfo", err)
+			_, err = v.Destroy(ctx)
+			assertInvalid(t, "Volume.Destroy", err)
+			err = v.Delete(ctx)
+			assertInvalid(t, "Volume.Delete", err)
+			_, err = v.Stat(ctx, "/")
+			assertInvalid(t, "Volume.Stat(badID)", err)
+		})
+	}
+
+	if calls.Load() != 0 {
+		t.Fatalf("made %d HTTP calls for invalid volumeIDs, want 0", calls.Load())
+	}
+}
+
+func TestVolumeContentPathAndDepthValidation(t *testing.T) {
+	var calls atomic.Int32
+	hc := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			switch r.URL.Path {
+			case "/volumecontent/vol-1/path":
+				if r.URL.Query().Get("path") != "/" {
+					t.Errorf("unexpected stat path: %q", r.URL.Query().Get("path"))
+				}
+				body, _ := json.Marshal(map[string]any{
+					"name":  "/",
+					"type":  "directory",
+					"path":  "/",
+					"size":  0,
+					"mode":  0o755,
+					"uid":   0,
+					"gid":   0,
+					"atime": "2026-01-01T00:00:00Z",
+					"mtime": "2026-01-01T00:00:00Z",
+					"ctime": "2026-01-01T00:00:00Z",
+				})
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(bytes.NewReader(body)),
+				}, nil
+			case "/volumecontent/vol-1/dir":
+				if r.URL.Query().Get("path") != "/" {
+					t.Errorf("unexpected dir path: %q", r.URL.Query().Get("path"))
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader("[]")),
+				}, nil
+			}
+			t.Errorf("unexpected HTTP request: %s %s", r.Method, r.URL.String())
+			return nil, errors.New("unexpected network call")
+		}),
+	}
+
+	cli, err := volume.NewClient(e2b.Config{
+		APIKey:     "test-key",
+		Domain:     "example.com",
+		HTTPClient: hc,
+		Retries:    new(0),
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	v, err := cli.ConnectWithToken("vol-1", "tok-1")
+	if err != nil {
+		t.Fatalf("ConnectWithToken: %v", err)
+	}
+	ctx := context.Background()
+
+	assertInvalid := func(t *testing.T, name string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected error, got nil", name)
+		}
+		if _, ok := errors.AsType[*e2b.InvalidArgumentError](err); !ok {
+			t.Fatalf("%s: want *e2b.InvalidArgumentError, got %T: %v", name, err, err)
+		}
+		if _, ok := errors.AsType[*e2b.VolumeError](err); !ok {
+			t.Fatalf("%s: want *e2b.VolumeError, got %T: %v", name, err, err)
+		}
+	}
+
+	_, err = v.Stat(ctx, "")
+	assertInvalid(t, "Stat", err)
+	_, err = v.Exists(ctx, "")
+	assertInvalid(t, "Exists", err)
+	_, err = v.UpdateMetadata(ctx, "", volume.MetadataOptions{})
+	assertInvalid(t, "UpdateMetadata", err)
+	_, err = v.List(ctx, "")
+	assertInvalid(t, "List", err)
+	err = v.MakeDir(ctx, "")
+	assertInvalid(t, "MakeDir", err)
+	_, err = v.MakeDirWithOptions(ctx, "", volume.MakeDirOptions{})
+	assertInvalid(t, "MakeDirWithOptions", err)
+	err = v.Remove(ctx, "")
+	assertInvalid(t, "Remove", err)
+	_, err = v.ReadFile(ctx, "")
+	assertInvalid(t, "ReadFile", err)
+	_, err = v.ReadFileString(ctx, "")
+	assertInvalid(t, "ReadFileString", err)
+	if rc, err := v.ReadFileStream(ctx, ""); err == nil {
+		_ = rc.Close()
+		t.Fatal("ReadFileStream: expected error for empty path")
+	} else {
+		assertInvalid(t, "ReadFileStream", err)
+	}
+	err = v.WriteFile(ctx, "", []byte("data"))
+	assertInvalid(t, "WriteFile", err)
+	_, err = v.WriteFileWithOptions(ctx, "", []byte("data"), volume.WriteOptions{})
+	assertInvalid(t, "WriteFileWithOptions", err)
+	_, err = v.WriteFileStream(ctx, "", strings.NewReader("data"))
+	assertInvalid(t, "WriteFileStream", err)
+
+	// Depth overflow guard (on 64-bit platforms where int can exceed math.MaxUint32).
+	if int64(math.MaxInt) > math.MaxUint32 {
+		maxU32 := int64(math.MaxUint32)
+		_, err = v.List(ctx, "/", volume.ListOptions{Depth: int(maxU32 + 1)})
+		assertInvalid(t, "List(Depth > MaxUint32)", err)
+	}
+
+	if calls.Load() != 0 {
+		t.Fatalf("made %d HTTP calls for invalid path/depth, want 0", calls.Load())
+	}
+
+	// Root directory "/" remains valid.
+	if _, err := v.Stat(ctx, "/"); err != nil {
+		t.Fatalf("Stat(/): %v", err)
+	}
+	if _, err := v.List(ctx, "/"); err != nil {
+		t.Fatalf("List(/): %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("root path calls = %d, want 2", calls.Load())
+	}
+}
+
+type trackingReadCloser struct {
+	r      *bytes.Reader
+	closed bool
+}
+
+func (tr *trackingReadCloser) Read(p []byte) (int, error) { return tr.r.Read(p) }
+func (tr *trackingReadCloser) Close() error {
+	tr.closed = true
+	return nil
+}
+
+func TestVolumeRemoveAndDestroyDrainResponseBody(t *testing.T) {
+	bodies := make([]*trackingReadCloser, 0, 2)
+	hc := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			b := &trackingReadCloser{r: bytes.NewReader([]byte(`{"status":"ok"}`))}
+			bodies = append(bodies, b)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       b,
+			}, nil
+		}),
+	}
+	cli, err := volume.NewClient(e2b.Config{
+		APIKey:     "test-key",
+		Domain:     "example.com",
+		HTTPClient: hc,
+		Retries:    new(0),
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	v, err := cli.ConnectWithToken("vol-1", "tok-1")
+	if err != nil {
+		t.Fatalf("ConnectWithToken: %v", err)
+	}
+
+	if err := v.Remove(context.Background(), "/file.txt"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if ok, err := v.Destroy(context.Background()); err != nil || !ok {
+		t.Fatalf("Destroy = (%v, %v), want (true, nil)", ok, err)
+	}
+
+	if len(bodies) != 2 {
+		t.Fatalf("recorded %d response bodies, want 2", len(bodies))
+	}
+	for i, b := range bodies {
+		if !b.closed {
+			t.Errorf("body[%d] was not closed", i)
+		}
+		if b.r.Len() != 0 {
+			t.Errorf("body[%d] had %d unread bytes remaining", i, b.r.Len())
+		}
 	}
 }
