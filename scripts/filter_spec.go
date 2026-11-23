@@ -1,5 +1,3 @@
-//go:build ignore
-
 // filter_spec trims the upstream E2B OpenAPI specs down to the surface the Go
 // SDK generates clients for. It mirrors the decorators in upstream
 // E2B/redocly.yaml (which the JS/Python SDK pipelines run through `redocly
@@ -26,7 +24,7 @@
 //
 // Usage (invoked by scripts/sync-spec.sh):
 //
-//	go run ./scripts/filter_spec.go <api|internal> <file.yml> [<file.yml>...]
+//	go run -mod=readonly ./scripts/filter_spec.go <api|internal> <file.yml> [<file.yml>...]
 package main
 
 import (
@@ -67,17 +65,29 @@ func filterFile(mode, path string) error {
 	if err != nil {
 		return err
 	}
-	if strings.Contains(string(raw), "\t") {
-		return fmt.Errorf("tab characters are not supported")
+	out, removedOps, pruned, err := filterText(mode, string(raw))
+	if err != nil {
+		return err
 	}
-	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "==> filtered %s (mode=%s): removed %d operations, pruned %d components\n", path, mode, removedOps, pruned)
+	return nil
+}
+
+func filterText(mode, raw string) (string, int, int, error) {
+	if strings.Contains(raw, "\t") {
+		return "", 0, 0, fmt.Errorf("tab characters are not supported")
+	}
+	text := strings.ReplaceAll(raw, "\r\n", "\n")
 	trailingNL := strings.HasSuffix(text, "\n")
 	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
 
 	lines = stripNotImplemented(lines)
 	lines, removedOps, err := filterPaths(mode, lines)
 	if err != nil {
-		return err
+		return "", 0, 0, err
 	}
 	lines, pruned := pruneComponents(lines)
 	lines = collapseBlankLines(lines)
@@ -86,11 +96,7 @@ func filterFile(mode, path string) error {
 	if trailingNL {
 		out += "\n"
 	}
-	if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "==> filtered %s (mode=%s): removed %d operations, pruned %d components\n", path, mode, removedOps, pruned)
-	return nil
+	return out, removedOps, pruned, nil
 }
 
 func indent(line string) int {
@@ -149,26 +155,143 @@ func value(line string) string {
 	return v
 }
 
+func isSeqItem(line string) bool {
+	t := strings.TrimSpace(line)
+	return t == "-" || strings.HasPrefix(t, "- ")
+}
+
+// isBlockScalarHeader reports whether a YAML scalar value (with any trailing
+// comment stripped) introduces a literal ('|') or folded ('>') block scalar,
+// e.g. "|", "|-", ">+", "|2", ">-2".
+func isBlockScalarHeader(v string) bool {
+	if v == "" || (v[0] != '|' && v[0] != '>') {
+		return false
+	}
+	rest := v[1:]
+	var seenChomp, seenIndent bool
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case '-', '+':
+			if seenChomp {
+				return false
+			}
+			seenChomp = true
+		case '1', '2', '3', '4', '5', '6', '7', '8', '9':
+			if seenIndent {
+				return false
+			}
+			seenIndent = true
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func startsBlockScalar(line string) (int, bool) {
+	ind := indent(line)
+	if ind < 0 {
+		return 0, false
+	}
+	if isBlockScalarHeader(value(line)) {
+		return ind, true
+	}
+	t := strings.TrimSpace(line)
+	if strings.HasPrefix(t, "- ") {
+		rem := strings.TrimSpace(t[2:])
+		if j := strings.Index(rem, " #"); j >= 0 {
+			rem = strings.TrimSpace(rem[:j])
+		}
+		if isBlockScalarHeader(rem) {
+			return ind, true
+		}
+	}
+	return 0, false
+}
+
+// blockScalarLines marks every line that is body content inside a YAML literal
+// ('|') or folded ('>') block scalar so structural passes ignore prose.
+func blockScalarLines(lines []string) []bool {
+	inScalar := make([]bool, len(lines))
+	active := false
+	parentInd := -1
+	for i, l := range lines {
+		if active {
+			trimmed := strings.TrimLeft(l, " ")
+			if trimmed == "" || len(l)-len(trimmed) > parentInd {
+				inScalar[i] = true
+				continue
+			}
+			active = false
+		}
+		if pInd, ok := startsBlockScalar(l); ok {
+			active = true
+			parentInd = pInd
+		}
+	}
+	return inScalar
+}
+
 func blockEnd(lines []string, start int) int {
 	base := indent(lines[start])
+	// YAML allows sequence items under a mapping key to share the key's indent
+	// (e.g. "tags:\n- templates").
+	allowSameIndentSeq := !isSeqItem(lines[start]) && key(lines[start]) != "" && value(lines[start]) == ""
+	inScalar := false
+	scalarParentInd := -1
+	if pInd, ok := startsBlockScalar(lines[start]); ok {
+		inScalar = true
+		scalarParentInd = pInd
+	}
 	end := start + 1
 	for i := start + 1; i < len(lines); i++ {
+		if inScalar {
+			trimmed := strings.TrimLeft(lines[i], " ")
+			if trimmed == "" {
+				continue
+			}
+			if len(lines[i])-len(trimmed) > scalarParentInd {
+				end = i + 1
+				continue
+			}
+			inScalar = false
+		}
 		ind := indent(lines[i])
 		if ind == -1 {
 			continue
 		}
-		if ind <= base {
+		if ind < base {
+			break
+		}
+		if ind == base && (!allowSameIndentSeq || !isSeqItem(lines[i])) {
 			break
 		}
 		end = i + 1
+		if pInd, ok := startsBlockScalar(lines[i]); ok {
+			inScalar = true
+			scalarParentInd = pInd
+		}
 	}
 	return end
 }
 
 func section(lines []string, name string) (start, end int, ok bool) {
+	inScalar := false
+	scalarParentInd := -1
 	for i, l := range lines {
+		if inScalar {
+			trimmed := strings.TrimLeft(l, " ")
+			if trimmed == "" || len(l)-len(trimmed) > scalarParentInd {
+				continue
+			}
+			inScalar = false
+		}
 		if indent(l) == 0 && key(l) == name {
 			return i + 1, blockEnd(lines, i), true
+		}
+		if pInd, ok := startsBlockScalar(l); ok {
+			inScalar = true
+			scalarParentInd = pInd
 		}
 	}
 	return 0, 0, false
@@ -176,9 +299,22 @@ func section(lines []string, name string) (start, end int, ok bool) {
 
 func children(lines []string, start, end, ind int) []int {
 	var out []int
+	inScalar := false
+	scalarParentInd := -1
 	for i := start; i < end; i++ {
+		if inScalar {
+			trimmed := strings.TrimLeft(lines[i], " ")
+			if trimmed == "" || len(lines[i])-len(trimmed) > scalarParentInd {
+				continue
+			}
+			inScalar = false
+		}
 		if indent(lines[i]) == ind {
 			out = append(out, i)
+		}
+		if pInd, ok := startsBlockScalar(lines[i]); ok {
+			inScalar = true
+			scalarParentInd = pInd
 		}
 	}
 	return out
@@ -199,8 +335,12 @@ func collapseBlankLines(lines []string) []string {
 
 func stripNotImplemented(lines []string) []string {
 	for {
+		inScalar := blockScalarLines(lines)
 		hit := -1
 		for i, l := range lines {
+			if inScalar[i] {
+				continue
+			}
 			if key(l) == "x-not-implemented" && isTrue(value(l)) {
 				hit = i
 				break
@@ -212,6 +352,9 @@ func stripNotImplemented(lines []string) []string {
 		ind := indent(lines[hit])
 		parent := -1
 		for i := hit - 1; i >= 0; i-- {
+			if inScalar[i] {
+				continue
+			}
 			if p := indent(lines[i]); p != -1 && p < ind {
 				parent = i
 				break
@@ -221,8 +364,47 @@ func stripNotImplemented(lines []string) []string {
 			lines = slices.Delete(lines, hit, hit+1)
 			continue
 		}
+		wasPathOp := false
+		if indent(lines[parent]) == 4 && slices.Contains(httpMethods, key(lines[parent])) {
+			if pStart, pEnd, ok := section(lines, "paths"); ok && parent >= pStart && parent < pEnd {
+				wasPathOp = true
+			}
+		}
 		lines = slices.Delete(lines, parent, blockEnd(lines, parent))
+		if wasPathOp {
+			lines = pruneEmptyPathItem(lines, parent)
+		}
 	}
+}
+
+// pruneEmptyPathItem removes the enclosing indent-2 path item if stripping an
+// operation left it with no remaining HTTP methods.
+func pruneEmptyPathItem(lines []string, deletedAt int) []string {
+	pStart, pEnd, ok := section(lines, "paths")
+	if !ok {
+		return lines
+	}
+	inScalar := blockScalarLines(lines)
+	pathIdx := -1
+	for i := min(deletedAt, len(lines)) - 1; i >= pStart; i-- {
+		if inScalar[i] {
+			continue
+		}
+		if indent(lines[i]) == 2 {
+			pathIdx = i
+			break
+		}
+	}
+	if pathIdx < 0 || pathIdx >= pEnd || !strings.HasPrefix(key(lines[pathIdx]), "/") {
+		return lines
+	}
+	itemEnd := blockEnd(lines, pathIdx)
+	for _, m := range children(lines, pathIdx+1, itemEnd, 4) {
+		if slices.Contains(httpMethods, key(lines[m])) {
+			return lines
+		}
+	}
+	return slices.Delete(lines, pathIdx, itemEnd)
 }
 
 func filterPaths(mode string, lines []string) ([]string, int, error) {
@@ -264,8 +446,8 @@ func filterPaths(mode string, lines []string) ([]string, int, error) {
 			drop = append(drop, opDrops...)
 		}
 	}
-	for i := len(drop) - 1; i >= 0; i-- {
-		lines = slices.Delete(lines, drop[i].from, drop[i].to)
+	for _, d := range slices.Backward(drop) {
+		lines = slices.Delete(lines, d.from, d.to)
 	}
 	return lines, removed, nil
 }
@@ -303,7 +485,7 @@ func operationTags(lines []string, at, end int) []string {
 	var tags []string
 	if v := value(lines[at]); v != "" {
 		v = strings.TrimSuffix(strings.TrimPrefix(v, "["), "]")
-		for _, t := range strings.Split(v, ",") {
+		for t := range strings.SplitSeq(v, ",") {
 			if t = strings.Trim(strings.TrimSpace(t), `"'`); t != "" {
 				tags = append(tags, t)
 			}
@@ -324,8 +506,8 @@ func pruneComponents(lines []string) ([]string, int) {
 	if !ok {
 		return lines, 0
 	}
-	type entry struct{ from, to int }
-	blocks := map[string]entry{}
+	type span struct{ from, to int }
+	blocks := map[string]span{}
 	type group struct {
 		kind     string
 		from, to int
@@ -337,7 +519,7 @@ func pruneComponents(lines []string) ([]string, int) {
 		gr := group{kind: key(lines[g]), from: g, to: gEnd}
 		for _, n := range children(lines, g+1, gEnd, 4) {
 			name := key(lines[n])
-			blocks[gr.kind+"/"+name] = entry{n, blockEnd(lines, n)}
+			blocks[gr.kind+"/"+name] = span{n, blockEnd(lines, n)}
 			gr.names = append(gr.names, name)
 		}
 		groups = append(groups, gr)
@@ -366,7 +548,6 @@ func pruneComponents(lines []string) ([]string, int) {
 		}
 	}
 
-	type span struct{ from, to int }
 	var drop []span
 	pruned := 0
 	for _, g := range groups {
@@ -380,8 +561,7 @@ func pruneComponents(lines []string) ([]string, int) {
 				keptNames++
 				continue
 			}
-			b := blocks[g.kind+"/"+n]
-			groupDrops = append(groupDrops, span{b.from, b.to})
+			groupDrops = append(groupDrops, blocks[g.kind+"/"+n])
 			pruned++
 		}
 		if keptNames == 0 && len(g.names) > 0 {
@@ -391,8 +571,8 @@ func pruneComponents(lines []string) ([]string, int) {
 		}
 	}
 	slices.SortFunc(drop, func(a, b span) int { return a.from - b.from })
-	for i := len(drop) - 1; i >= 0; i-- {
-		lines = slices.Delete(lines, drop[i].from, drop[i].to)
+	for _, d := range slices.Backward(drop) {
+		lines = slices.Delete(lines, d.from, d.to)
 	}
 	return lines, pruned
 }

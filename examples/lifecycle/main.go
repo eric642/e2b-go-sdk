@@ -22,17 +22,23 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
 	cli, err := template.NewClient(e2b.Config{})
 	if err != nil {
-		log.Fatalf("template client: %v", err)
+		return fmt.Errorf("template client: %w", err)
 	}
 
 	existing, err := cli.ListAllV2(ctx, template.ListV2Options{})
 	if err != nil {
-		log.Fatalf("list templates: %v", err)
+		return fmt.Errorf("list templates: %w", err)
 	}
 	fmt.Printf("existing templates: %d\n", len(existing))
 	for i, t := range existing {
@@ -55,7 +61,7 @@ func main() {
 
 	events, err := cli.BuildStream(ctx, tpl.Builder(), template.BuildOptions{Name: name})
 	if err != nil {
-		log.Fatalf("build start: %v", err)
+		return fmt.Errorf("build start: %w", err)
 	}
 	var info *template.BuildInfo
 	for ev := range events {
@@ -63,13 +69,13 @@ func main() {
 		case ev.Log != nil:
 			fmt.Printf("[%s] %s\n", ev.Log.Level, ev.Log.Message)
 		case ev.Err != nil:
-			log.Fatalf("build: %v", ev.Err)
+			return fmt.Errorf("build: %w", ev.Err)
 		case ev.Done != nil:
 			info = ev.Done
 		}
 	}
 	if info == nil {
-		log.Fatal("build finished without a BuildInfo")
+		return fmt.Errorf("build finished without a BuildInfo")
 	}
 	fmt.Printf("\ntemplate built: id=%s build=%s\n", info.TemplateID, info.BuildID)
 
@@ -85,7 +91,7 @@ func main() {
 
 	detail, err := cli.Get(ctx, info.TemplateID, template.GetOptions{Limit: 5})
 	if err != nil {
-		log.Fatalf("get template: %v", err)
+		return fmt.Errorf("get template: %w", err)
 	}
 	fmt.Printf("template detail: names=%v public=%v builds=%d\n",
 		detail.Names, detail.Public, len(detail.Builds))
@@ -96,14 +102,14 @@ func main() {
 
 	client, err := e2b.NewClient(e2b.Config{})
 	if err != nil {
-		log.Fatalf("client: %v", err)
+		return fmt.Errorf("client: %w", err)
 	}
 	sbx, err := client.Create(ctx, e2b.CreateOptions{
 		Template: info.TemplateID,
 		Timeout:  5 * time.Minute,
 	})
 	if err != nil {
-		log.Fatalf("create sandbox: %v", err)
+		return fmt.Errorf("create sandbox: %w", err)
 	}
 	defer func() {
 		killCtx, killCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -118,11 +124,12 @@ func main() {
 
 	si, err := sbx.GetInfo(ctx)
 	if err != nil {
-		log.Fatalf("sandbox info: %v", err)
+		return fmt.Errorf("sandbox info: %w", err)
 	}
 	fmt.Printf("sandbox info: state=%s cpu=%d memMB=%d template=%s started=%s endAt=%s\n",
 		si.State, si.CPUCount, si.MemoryMB, si.TemplateID,
 		si.StartedAt.Format(time.RFC3339), si.EndAt.Format(time.RFC3339))
+	return nil
 }
 
 func firstOr(names []string, fallback string) string {

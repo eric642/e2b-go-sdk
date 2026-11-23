@@ -48,6 +48,12 @@ const (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
 
@@ -60,7 +66,7 @@ func main() {
 	} else {
 		cli, err := template.NewClient(e2b.Config{})
 		if err != nil {
-			log.Fatalf("template client: %v", err)
+			return fmt.Errorf("template client: %w", err)
 		}
 
 		tpl := template.New().
@@ -77,7 +83,7 @@ func main() {
 			MemoryMB: 4096,
 		})
 		if err != nil {
-			log.Fatalf("build start: %v", err)
+			return fmt.Errorf("build start: %w", err)
 		}
 		var info *template.BuildInfo
 		for ev := range events {
@@ -85,13 +91,13 @@ func main() {
 			case ev.Log != nil:
 				fmt.Printf("[%s] %s\n", ev.Log.Level, ev.Log.Message)
 			case ev.Err != nil:
-				log.Fatalf("build: %v", ev.Err)
+				return fmt.Errorf("build: %w", ev.Err)
 			case ev.Done != nil:
 				info = ev.Done
 			}
 		}
 		if info == nil {
-			log.Fatal("build finished without a BuildInfo")
+			return fmt.Errorf("build finished without a BuildInfo")
 		}
 		templateID = info.TemplateID
 		fmt.Printf("\ntemplate built: id=%s build=%s\n", info.TemplateID, info.BuildID)
@@ -106,20 +112,17 @@ func main() {
 		}()
 	}
 
-	// 2) Launch a sandbox and tear it down on exit. RequestTimeoutDisabled on
-	//    Config prevents the default 60s HTTP client from cutting the PTY
-	//    stream short.
-	client, err := e2b.NewClient(e2b.Config{RequestTimeoutDisabled: true})
+	// 2) Launch a sandbox and tear it down on exit.
+	client, err := e2b.NewClient(e2b.Config{})
 	if err != nil {
-		log.Fatalf("client: %v", err)
+		return fmt.Errorf("client: %w", err)
 	}
 	sbx, err := client.Create(ctx, e2b.CreateOptions{
 		Template: templateID,
 		Timeout:  15 * time.Minute,
-		Secure:   true,
 	})
 	if err != nil {
-		log.Fatalf("create sandbox: %v", err)
+		return fmt.Errorf("create sandbox: %w", err)
 	}
 	defer func() {
 		killCtx, killCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -136,20 +139,20 @@ func main() {
 	//    so the PTY-mirror assertion is deterministic.
 	if err := waitForDesktop(ctx, sbx, 3*time.Minute); err != nil {
 		log.Printf("desktop diagnostics:\n%s", collectDesktopDiagnostics(ctx, sbx))
-		log.Fatalf("desktop didn't come up: %v", err)
+		return fmt.Errorf("desktop didn't come up: %w", err)
 	}
 	fmt.Printf("terminal noVNC URL: https://%s/vnc.html\n", sbx.GetHost(terminalVNCPort))
 
 	// 4) Requirement 2: open an interactive PTY via the SDK, echo a marker,
 	//    then assert the marker shows up in the shared tmux session.
 	if err := proveSharedTmux(ctx, sbx); err != nil {
-		log.Fatalf("shared tmux assertion failed: %v", err)
+		return fmt.Errorf("shared tmux assertion failed: %w", err)
 	}
 	fmt.Println("PTY-mirror OK: SDK bash output is visible in the VNC desktop.")
 
 	// 5) Requirement 3: dev toolkit smoke test.
 	if err := smokeDevToolkit(ctx, sbx); err != nil {
-		log.Fatalf("dev toolkit smoke test: %v", err)
+		return fmt.Errorf("dev toolkit smoke test: %w", err)
 	}
 	fmt.Println("Python & Node toolkits OK.")
 
@@ -161,7 +164,7 @@ func main() {
 		browserURL = v
 	}
 	if err := launchBrowser(ctx, sbx, browserURL); err != nil {
-		log.Fatalf("launch browser: %v", err)
+		return fmt.Errorf("launch browser: %w", err)
 	}
 	fmt.Printf("browser noVNC URL:  https://%s/vnc.html (opened %s)\n", sbx.GetHost(browserVNCPort), browserURL)
 
@@ -173,12 +176,14 @@ func main() {
 	// and template.Delete still run after this returns.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 	select {
 	case s := <-sigCh:
 		fmt.Printf("\nreceived %s, shutting down...\n", s)
 	case <-ctx.Done():
 		fmt.Printf("\ncontext done (%v), shutting down...\n", ctx.Err())
 	}
+	return nil
 }
 
 // waitForDesktop polls inside the sandbox until websockify and the shared
@@ -287,7 +292,11 @@ func proveSharedTmux(ctx context.Context, sbx *e2b.Sandbox) error {
 	if err != nil {
 		return fmt.Errorf("pty create: %w", err)
 	}
-	defer func() { _, _ = pty.Kill(context.Background()) }()
+	defer func() {
+		killCtx, killCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer killCancel()
+		_, _ = pty.Kill(killCtx)
+	}()
 
 	pid, err := waitForPID(pty, 10*time.Second)
 	if err != nil {

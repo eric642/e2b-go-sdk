@@ -9,17 +9,15 @@
 //	go run ./examples/terminal
 //
 // Type `exit` or press Ctrl+D inside the remote shell to quit. The sandbox
-// is killed automatically on return. Unix only (uses SIGWINCH).
+// is killed automatically on return. Terminal resize forwarding uses SIGWINCH
+// on Unix and is a no-op on other platforms.
 package main
 
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"golang.org/x/term"
@@ -28,36 +26,41 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	cfg := e2b.Config{
 		APIKey: os.Getenv("E2B_API_KEY"),
 		Domain: os.Getenv("E2B_DOMAIN"),
 		APIURL: os.Getenv("E2B_API_URL"),
-		// PTY event stream is long-lived; the default 60s HTTP client timeout
-		// would cut it off mid-session.
-		RequestTimeoutDisabled: true,
 	}
 	if cfg.APIKey == "" {
-		log.Fatal("E2B_API_KEY is required")
+		return fmt.Errorf("E2B_API_KEY is required")
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	client, err := e2b.NewClient(cfg)
 	if err != nil {
-		log.Fatalf("client: %v", err)
+		return fmt.Errorf("client: %w", err)
 	}
 
 	sbx, err := client.Create(ctx, e2b.CreateOptions{
 		Template: envOr("E2B_TEMPLATE", "base"),
 		Timeout:  30 * time.Minute,
 		Metadata: map[string]string{"example": "terminal"},
-		Secure:   true,
 	})
 	if err != nil {
-		log.Fatalf("create sandbox: %v", err)
+		return fmt.Errorf("create sandbox: %w", err)
 	}
 	defer func() {
-		if err := sbx.Kill(context.Background()); err != nil {
+		killCtx, killCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer killCancel()
+		if err := sbx.Kill(killCtx); err != nil {
 			log.Printf("kill sandbox: %v", err)
 		}
 	}()
@@ -79,21 +82,25 @@ func main() {
 		Envs: map[string]string{"TERM": envOr("TERM", "xterm-256color")},
 	})
 	if err != nil {
-		log.Fatalf("pty create: %v", err)
+		return fmt.Errorf("pty create: %w", err)
 	}
 
 	pid, err := waitForPID(handle, 5*time.Second)
 	if err != nil {
-		log.Fatalf("waiting for pid: %v", err)
+		return fmt.Errorf("waiting for pid: %w", err)
 	}
 
 	var oldState *term.State
 	if term.IsTerminal(fd) {
 		oldState, err = term.MakeRaw(fd)
 		if err != nil {
-			log.Fatalf("make raw: %v", err)
+			return fmt.Errorf("make raw: %w", err)
 		}
-		defer func() { _ = term.Restore(fd, oldState) }()
+		defer func() {
+			if oldState != nil {
+				_ = term.Restore(fd, oldState)
+			}
+		}()
 	}
 
 	go pumpStdinToPty(ctx, sbx, pid)
@@ -103,6 +110,7 @@ func main() {
 	result, err := handle.Wait(ctx)
 	if oldState != nil {
 		_ = term.Restore(fd, oldState)
+		oldState = nil
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\r\nsession ended: %v\r\n", err)
@@ -110,6 +118,7 @@ func main() {
 	if result != nil {
 		fmt.Fprintf(os.Stderr, "\r\nexit code: %d (sandbox %s)\r\n", result.ExitCode, sbx.ID)
 	}
+	return nil
 }
 
 func waitForPID(h *e2b.CommandHandle, timeout time.Duration) (uint32, error) {
@@ -143,26 +152,8 @@ func pumpStdinToPty(ctx context.Context, sbx *e2b.Sandbox, pid uint32) {
 func pumpPtyToStdout(h *e2b.CommandHandle) {
 	for data := range h.PtyOutput() {
 		if _, err := os.Stdout.Write(data); err != nil {
-			if err != io.EOF {
-				return
-			}
 			return
 		}
-	}
-}
-
-func watchResize(ctx context.Context, sbx *e2b.Sandbox, pid uint32, fd int) {
-	if !term.IsTerminal(fd) {
-		return
-	}
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGWINCH)
-	for range ch {
-		cols, rows, err := term.GetSize(fd)
-		if err != nil {
-			continue
-		}
-		_ = sbx.Pty.Resize(ctx, pid, uint32(cols), uint32(rows))
 	}
 }
 

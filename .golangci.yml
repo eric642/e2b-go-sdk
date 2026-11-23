@@ -7,24 +7,38 @@ run:
 linters:
   default: none
   enable:
+    - bodyclose
     - errcheck
+    - errorlint
     - govet
     - ineffassign
+    - nilerr
+    - nolintlint
     - staticcheck
+    - thelper
+    - unconvert
     - unused
 
   exclusions:
-    # Generated clients live under internal/ and upstream submodules shouldn't be hand-linted.
+    # Generated clients live under specific internal/ subdirectories; internal/transport/
+    # and scripts/ are hand-written and remain actively linted. Upstream submodules are excluded.
     paths:
-      - internal
-      - E2B
-      - runtime
+      - ^internal/api/
+      - ^internal/envd/
+      - ^internal/envdapi/
+      - ^internal/volumeapi/
+      - ^internal/version/
+      - ^E2B/
+      - ^runtime/
 
   settings:
     errcheck:
       exclude-functions:
         - (*os.File).Close
         - (io.Closer).Close
+    nolintlint:
+      require-specific: true
+      require-explanation: true
     staticcheck:
       checks:
         - all

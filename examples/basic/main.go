@@ -17,12 +17,18 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	client, err := e2b.NewClient(e2b.Config{})
 	if err != nil {
-		log.Fatalf("client: %v", err)
+		return fmt.Errorf("client: %w", err)
 	}
 
 	sbx, err := client.Create(ctx, e2b.CreateOptions{
@@ -30,10 +36,12 @@ func main() {
 		Timeout:  5 * time.Minute,
 	})
 	if err != nil {
-		log.Fatalf("create: %v", err)
+		return fmt.Errorf("create: %w", err)
 	}
 	defer func() {
-		if err := sbx.Kill(ctx); err != nil {
+		killCtx, killCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer killCancel()
+		if err := sbx.Kill(killCtx); err != nil {
 			log.Printf("kill: %v", err)
 		}
 	}()
@@ -45,13 +53,14 @@ func main() {
 		TimeoutMs: 10_000,
 	})
 	if err != nil {
-		log.Fatalf("run: %v", err)
+		return fmt.Errorf("run: %w", err)
 	}
 	res, err := handle.Wait(ctx)
 	if err != nil {
-		log.Fatalf("wait: %v", err)
+		return fmt.Errorf("wait: %w", err)
 	}
 	fmt.Printf("exit=%d stdout=%s", res.ExitCode, res.Stdout)
+	return nil
 }
 
 func envOr(key, fallback string) string {

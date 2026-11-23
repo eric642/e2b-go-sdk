@@ -18,6 +18,12 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
@@ -28,14 +34,14 @@ func main() {
 
 	cli, err := template.NewClient(e2b.Config{})
 	if err != nil {
-		log.Fatalf("template client: %v", err)
+		return fmt.Errorf("template client: %w", err)
 	}
 
 	events, err := cli.BuildStream(ctx, tpl.Builder(), template.BuildOptions{
 		Name: "go-sdk-demo:latest",
 	})
 	if err != nil {
-		log.Fatalf("build start: %v", err)
+		return fmt.Errorf("build start: %w", err)
 	}
 
 	var info *template.BuildInfo
@@ -44,28 +50,31 @@ func main() {
 		case ev.Log != nil:
 			fmt.Printf("[%s] %s\n", ev.Log.Level, ev.Log.Message)
 		case ev.Err != nil:
-			log.Fatalf("build: %v", ev.Err)
+			return fmt.Errorf("build: %w", ev.Err)
 		case ev.Done != nil:
 			info = ev.Done
 		}
 	}
 	if info == nil {
-		log.Fatal("build finished without a BuildInfo")
+		return fmt.Errorf("build finished without a BuildInfo")
 	}
 	fmt.Printf("template built: %s\n", info.TemplateID)
 
 	client, err := e2b.NewClient(e2b.Config{})
 	if err != nil {
-		log.Fatalf("client: %v", err)
+		return fmt.Errorf("client: %w", err)
 	}
 	sbx, err := client.Create(ctx, e2b.CreateOptions{Template: info.TemplateID})
 	if err != nil {
-		log.Fatalf("create sandbox: %v", err)
+		return fmt.Errorf("create sandbox: %w", err)
 	}
 	defer func() {
-		if err := sbx.Kill(ctx); err != nil {
+		killCtx, killCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer killCancel()
+		if err := sbx.Kill(killCtx); err != nil {
 			log.Printf("sandbox kill: %v", err)
 		}
 	}()
 	fmt.Printf("sandbox id: %s\n", sbx.ID)
+	return nil
 }

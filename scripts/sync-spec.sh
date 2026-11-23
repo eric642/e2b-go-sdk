@@ -41,7 +41,12 @@ SKIP_FETCH=false
 FETCH_TIMEOUT="${FETCH_TIMEOUT:-60}"
 while (( $# )); do
   case "$1" in
-    --ref)        USE_REF=true; TAG="${2:-}"; shift 2 ;;
+    --ref)
+      [[ $# -ge 2 && -n "$2" ]] || die "--ref requires a non-empty argument"
+      USE_REF=true
+      TAG="$2"
+      shift 2
+      ;;
     --skip-fetch) SKIP_FETCH=true; shift ;;
     -h|--help)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//'
@@ -116,8 +121,8 @@ extract spec/envd/filesystem/filesystem.proto "$SPEC_DIR/envd/filesystem/filesys
 log "filtering specs down to the SDK surface"
 (
   cd "$REPO_ROOT"
-  go run ./scripts/filter_spec.go api      spec/openapi.yml
-  go run ./scripts/filter_spec.go internal spec/envd/envd.yaml spec/openapi-volumecontent.yml
+  go run -mod=readonly ./scripts/filter_spec.go api      spec/openapi.yml
+  go run -mod=readonly ./scripts/filter_spec.go internal spec/envd/envd.yaml spec/openapi-volumecontent.yml
 )
 
 log "pinning spec/E2B_VERSION to $TAG"

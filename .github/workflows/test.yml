@@ -5,6 +5,13 @@ on:
     branches: [master, main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   unit:
     name: unit
@@ -15,8 +22,24 @@ jobs:
         with:
           go-version: '1.26.x'
           check-latest: true
-      - run: go vet ./...
-      - run: go test -race ./...
+      - name: Verify modules
+        run: |
+          go mod verify
+          go mod tidy -diff
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l *.go template volume internal/transport scripts examples)"
+          if [ -n "$unformatted" ]; then
+            echo "Unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Vet
+        run: go vet -mod=readonly ./...
+      - name: Vet (windows/amd64)
+        run: GOOS=windows GOARCH=amd64 go vet -mod=readonly ./...
+      - name: Test
+        run: go test -mod=readonly -race -shuffle=on -count=1 -cover ./...
 
   lint:
     name: lint
@@ -32,5 +55,8 @@ jobs:
       # package graph. Build from source on the runner instead so the
       # lint binary uses the same Go version we target.
       - name: Install golangci-lint from source
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
-      - run: golangci-lint run --timeout=5m
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+      - name: Lint
+        run: golangci-lint run --timeout=5m
+      - name: Lint (integration build tag)
+        run: golangci-lint run --build-tags=integration --timeout=5m

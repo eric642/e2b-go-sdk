@@ -28,6 +28,12 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -40,12 +46,12 @@ func main() {
 		},
 	}
 	if cfg.APIKey == "" {
-		log.Fatal("E2B_API_KEY is required")
+		return fmt.Errorf("E2B_API_KEY is required")
 	}
 
 	client, err := e2b.NewClient(cfg)
 	if err != nil {
-		log.Fatalf("client: %v", err)
+		return fmt.Errorf("client: %w", err)
 	}
 
 	sbx, err := client.CreateV1(ctx, e2b.CreateOptions{
@@ -54,10 +60,12 @@ func main() {
 		Metadata: map[string]string{"example": "selfhosted"},
 	})
 	if err != nil {
-		log.Fatalf("create v1: %v", err)
+		return fmt.Errorf("create v1: %w", err)
 	}
 	defer func() {
-		if err := sbx.Kill(ctx); err != nil {
+		killCtx, killCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer killCancel()
+		if err := sbx.Kill(killCtx); err != nil {
 			log.Printf("kill: %v", err)
 		}
 	}()
@@ -70,7 +78,7 @@ func main() {
 
 	info, err := sbx.GetInfo(ctx)
 	if err != nil {
-		log.Fatalf("get info: %v", err)
+		return fmt.Errorf("get info: %w", err)
 	}
 	fmt.Printf("Template:     %s\n", info.TemplateID)
 	fmt.Printf("State:        %s\n", info.State)
@@ -86,11 +94,11 @@ func main() {
 		TimeoutMs: 10_000,
 	})
 	if err != nil {
-		log.Fatalf("run: %v", err)
+		return fmt.Errorf("run: %w", err)
 	}
 	res, err := handle.Wait(ctx)
 	if err != nil {
-		log.Fatalf("wait: %v", err)
+		return fmt.Errorf("wait: %w", err)
 	}
 	fmt.Println("=== exec result ===")
 	fmt.Printf("exit=%d\n%s", res.ExitCode, res.Stdout)
@@ -106,6 +114,7 @@ func main() {
 		fmt.Printf("Disk: %d / %d bytes\n", m.DiskUsed, m.DiskTotal)
 		fmt.Printf("At:   %s\n", m.Timestamp.Format(time.RFC3339))
 	}
+	return nil
 }
 
 func envOr(key, fallback string) string {
