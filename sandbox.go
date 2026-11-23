@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,9 +29,18 @@ const (
 //   - Files: read/write/watch/compose
 //   - Git: git operations running inside the sandbox
 //
-// A *Sandbox is safe for concurrent use.
+// Methods on *Sandbox are safe for concurrent use. ID is immutable; Domain,
+// EnvdVersion, EnvdAccessToken, and TrafficAccessToken hold the initial
+// snapshot populated by Create/Connect/Resume and are updated in place by
+// Sandbox.Connect, Sandbox.ConnectV1, and Sandbox.Resume. Callers reading
+// those values concurrently with Connect/Resume should use CurrentDomain,
+// CurrentEnvdVersion, CurrentEnvdAccessToken, and CurrentTrafficAccessToken.
 type Sandbox struct {
-	ID                 string
+	ID string
+
+	// Exported snapshots refreshed by Sandbox.Connect, ConnectV1, and Resume.
+	// Use CurrentDomain, CurrentEnvdVersion, CurrentEnvdAccessToken, and
+	// CurrentTrafficAccessToken when reading concurrently with reconnects.
 	Domain             string
 	EnvdVersion        string
 	EnvdAccessToken    string
@@ -61,7 +71,9 @@ type CreateOptions struct {
 	// Template ID or alias to build the sandbox from. Defaults to "base" (or
 	// "mcp-gateway" when Mcp is non-nil).
 	Template string
-	// Timeout is the sandbox lifetime. Defaults to 5 minutes.
+	// Timeout is the sandbox lifetime. Defaults to 5 minutes when 0; sub-second
+	// positive durations round up to the next whole second, and negative or
+	// out-of-range durations return *InvalidArgumentError.
 	Timeout time.Duration
 	// IdempotencyKey sets the Idempotency-Key header on Create (POST /v2/sandboxes)
 	// using 1..255 lowercase ASCII letters, digits, or hyphens.
@@ -75,6 +87,7 @@ type CreateOptions struct {
 	Envs map[string]string
 
 	// Secure enables authenticated envd access on legacy POST /sandboxes.
+	//
 	// Deprecated: Create (/v2/sandboxes) is always secured, and CreateV1
 	// (/sandboxes) defaults to secure=true unless Insecure is true.
 	Secure bool
@@ -103,8 +116,10 @@ type CreateOptions struct {
 type ConnectOptions struct {
 	Config Config
 	// Timeout sets the sandbox TTL. On Connect (/v2/sandboxes/{id}/connect),
-	// <= 0 omits timeout so the server default (5 minutes) applies; on
-	// ConnectV1 (/sandboxes/{id}/connect), <= 0 sends DefaultSandboxTimeout.
+	// 0 omits timeout so the server default (5 minutes) applies; on ConnectV1
+	// (/sandboxes/{id}/connect), 0 sends DefaultSandboxTimeout. Sub-second
+	// positive durations round up to the next whole second; negative or
+	// out-of-range durations return *InvalidArgumentError.
 	Timeout time.Duration
 	// OnResume controls how a paused sandbox comes back: "restore" (restore
 	// memory snapshot, memory=true) or "reboot" (cold-boot from disk,
@@ -115,8 +130,9 @@ type ConnectOptions struct {
 // ResumeOptions configures Resume and Client.ResumeV1 (POST /sandboxes/{sandboxID}/resume).
 type ResumeOptions struct {
 	Config Config
-	// Timeout sets the resumed sandbox lifetime. <= 0 omits timeout so the
-	// server default applies.
+	// Timeout sets the resumed sandbox lifetime. 0 omits timeout so the server
+	// default applies. Sub-second positive durations round up to the next whole
+	// second; negative or out-of-range durations return *InvalidArgumentError.
 	Timeout time.Duration
 	// AutoPause overrides whether the resumed sandbox auto-pauses on timeout.
 	AutoPause *bool
@@ -292,9 +308,6 @@ func Kill(ctx context.Context, sandboxID string, opts ...ConnectOptions) (bool, 
 	if len(opts) > 0 {
 		o = opts[0]
 	}
-	if o.Config.resolve().Debug {
-		return true, nil
-	}
 	c, err := NewClient(o.Config)
 	if err != nil {
 		return false, err
@@ -364,12 +377,12 @@ func (s *Sandbox) Kill(ctx context.Context) error {
 	if err != nil {
 		return mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		drainResponseBody(resp.Body)
 		return nil
 	}
-	return mapHTTPErr(resp, s.ID)
+	return finishNoContent(resp, s.ID)
 }
 
 // SetTimeout updates the sandbox's inactivity timeout.
@@ -428,8 +441,9 @@ func (s *Sandbox) RefreshTimeoutV1(ctx context.Context, duration time.Duration) 
 func (s *Sandbox) IsRunning(ctx context.Context) (bool, error) {
 	s.mu.RLock()
 	autoResume := s.autoResume
-	envdWired := s.envd != nil
+	envd := s.envd
 	domain := s.Domain
+	envdTok := s.EnvdAccessToken
 	envdVer := s.EnvdVersion
 	s.mu.RUnlock()
 
@@ -440,7 +454,7 @@ func (s *Sandbox) IsRunning(ctx context.Context) (bool, error) {
 				return false, err
 			}
 		}
-		if !envdWired && s.cfg.SandboxURL == "" {
+		if envd == nil && s.cfg.SandboxURL == "" {
 			return isSandboxRunningViaControlPlane(ctx, s.apiCli, s.ID)
 		}
 	} else {
@@ -460,11 +474,23 @@ func (s *Sandbox) IsRunning(ctx context.Context) (bool, error) {
 		}
 	}
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, s.cfg.sandboxURL(s.ID, domain)+"/health", nil)
+	healthURL := strings.TrimRight(s.cfg.sandboxURL(s.ID, domain), "/") + "/health"
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, healthURL, nil)
 	if err != nil {
 		return false, newSandboxError("build health request", err)
 	}
-	transport.ApplyEnvdHeaders(req, s.currentEnvdAuth(), resolveEnvdUser(envdVer, ""))
+	var auth transport.EnvdAuth
+	if envd != nil {
+		auth = envd.Auth
+	} else {
+		auth = transport.EnvdAuth{
+			Token:     envdTok,
+			User:      resolveEnvdUser(envdVer, ""),
+			SandboxID: s.ID,
+			Headers:   s.cfg.envdHeaders(),
+		}
+	}
+	transport.ApplyEnvdHeaders(req, auth, resolveEnvdUser(envdVer, ""))
 
 	hc := s.httpCli
 	if hc == nil {
@@ -483,7 +509,7 @@ func (s *Sandbox) IsRunning(ctx context.Context) (bool, error) {
 		}
 		return false, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
@@ -509,26 +535,6 @@ func isSandboxRunningViaControlPlane(ctx context.Context, apiCli *apiclient.Clie
 		return false, err
 	}
 	return info.State == SandboxStateRunning, nil
-}
-
-func (s *Sandbox) currentEnvdAuth() transport.EnvdAuth {
-	s.mu.RLock()
-	envd := s.envd
-	tok := s.EnvdAccessToken
-	ver := s.EnvdVersion
-	s.mu.RUnlock()
-	if envd != nil {
-		return envd.Auth
-	}
-	if s.cfg.Debug {
-		ver = envdDebugFallback
-	}
-	return transport.EnvdAuth{
-		Token:     tok,
-		User:      resolveEnvdUser(ver, ""),
-		SandboxID: s.ID,
-		Headers:   s.cfg.envdHeaders(),
-	}
 }
 
 // Pause pauses this sandbox. Returns true on success; false (nil error) if the
@@ -610,10 +616,49 @@ func (s *Sandbox) GetMetrics(ctx context.Context, opts ...MetricsOptions) ([]San
 // GetHost returns the external hostname (or localhost:<port> in Debug mode) for
 // the given sandbox port.
 func (s *Sandbox) GetHost(port int) string {
+	return s.cfg.sandboxHost(s.ID, s.CurrentDomain(), port)
+}
+
+// CurrentDomain returns the sandbox's current domain safely under the
+// sandbox's internal lock. Prefer this over reading Domain directly when
+// Connect, ConnectV1, or Resume may run concurrently.
+func (s *Sandbox) CurrentDomain() string {
 	s.mu.RLock()
-	domain := s.Domain
+	v := s.Domain
 	s.mu.RUnlock()
-	return s.cfg.sandboxHost(s.ID, domain, port)
+	return v
+}
+
+// CurrentEnvdVersion returns the sandbox's current envd version safely under
+// the sandbox's internal lock. Prefer this over reading EnvdVersion directly
+// when Connect, ConnectV1, or Resume may run concurrently.
+func (s *Sandbox) CurrentEnvdVersion() string {
+	s.mu.RLock()
+	v := s.EnvdVersion
+	s.mu.RUnlock()
+	return v
+}
+
+// CurrentEnvdAccessToken returns the sandbox's current envd access token
+// safely under the sandbox's internal lock. Prefer this over reading
+// EnvdAccessToken directly when Connect, ConnectV1, or Resume may run
+// concurrently.
+func (s *Sandbox) CurrentEnvdAccessToken() string {
+	s.mu.RLock()
+	v := s.EnvdAccessToken
+	s.mu.RUnlock()
+	return v
+}
+
+// CurrentTrafficAccessToken returns the sandbox's current traffic access token
+// safely under the sandbox's internal lock. Prefer this over reading
+// TrafficAccessToken directly when Connect, ConnectV1, or Resume may run
+// concurrently.
+func (s *Sandbox) CurrentTrafficAccessToken() string {
+	s.mu.RLock()
+	v := s.TrafficAccessToken
+	s.mu.RUnlock()
+	return v
 }
 
 func (c *Client) newSandbox(created *apiclient.Sandbox) (*Sandbox, error) {
@@ -673,7 +718,7 @@ func (c *Client) finalizeCreatedSandbox(ctx context.Context, created *apiclient.
 	}
 
 	if !c.cfg.Debug && sbx.EnvdVersion != "" && compareEnvdVersions(sbx.envdVersionForGating(), "0.1.0") < 0 {
-		_, _ = c.Kill(context.WithoutCancel(ctx), sbx.ID)
+		c.killBestEffort(ctx, sbx.ID)
 		return nil, &TemplateError{
 			Message: fmt.Sprintf("template envd version %s is unsupported (requires envd >= 0.1.0); rebuild the template to use this SDK", sbx.EnvdVersion),
 		}
@@ -691,12 +736,13 @@ func (s *Sandbox) applyConnectedSandbox(connected *apiclient.Sandbox) error {
 	if connected == nil {
 		return nil
 	}
-	s.mu.RLock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	domain := s.Domain
 	envdTok := s.EnvdAccessToken
 	trafficTok := s.TrafficAccessToken
 	envdVer := s.EnvdVersion
-	s.mu.RUnlock()
 
 	if connected.Domain != nil && *connected.Domain != "" {
 		domain = *connected.Domain
@@ -734,7 +780,6 @@ func (s *Sandbox) applyConnectedSandbox(connected *apiclient.Sandbox) error {
 		}
 	}
 
-	s.mu.Lock()
 	s.Domain = domain
 	s.EnvdAccessToken = envdTok
 	s.TrafficAccessToken = trafficTok
@@ -742,7 +787,6 @@ func (s *Sandbox) applyConnectedSandbox(connected *apiclient.Sandbox) error {
 	if envd != nil {
 		s.envd = envd
 	}
-	s.mu.Unlock()
 	return nil
 }
 
@@ -797,8 +841,12 @@ func buildSandboxCommonFields(opts CreateOptions) (apiclient.NewSandboxV2, error
 		}
 	}
 	timeoutSec := int32(DefaultSandboxTimeout / time.Second)
-	if opts.Timeout > 0 {
-		timeoutSec = int32(opts.Timeout / time.Second)
+	if opts.Timeout != 0 {
+		var err error
+		timeoutSec, err = ceilSecondsInt32("timeout", opts.Timeout)
+		if err != nil {
+			return apiclient.NewSandboxV2{}, err
+		}
 	}
 
 	var cpuCount *int32
@@ -957,15 +1005,18 @@ func connectSandboxV2(ctx context.Context, apiCli *apiclient.Client, sandboxID s
 		return nil, err
 	}
 	body := apiclient.ConnectSandboxV2{Memory: mem}
-	if opts.Timeout > 0 {
-		sec := int32(opts.Timeout / time.Second)
+	if opts.Timeout != 0 {
+		sec, err := ceilSecondsInt32("timeout", opts.Timeout)
+		if err != nil {
+			return nil, err
+		}
 		body.Timeout = &sec
 	}
 	resp, err := apiCli.PostV2SandboxesSandboxIDConnect(ctx, sandboxID, body)
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, sandboxID); err != nil {
 		return nil, err
 	}
@@ -987,19 +1038,22 @@ func connectSandboxV1(ctx context.Context, apiCli *apiclient.Client, sandboxID s
 	if err != nil {
 		return nil, err
 	}
-	timeout := opts.Timeout
-	if timeout <= 0 {
-		timeout = DefaultSandboxTimeout
+	timeoutSec := int32(DefaultSandboxTimeout / time.Second)
+	if opts.Timeout != 0 {
+		timeoutSec, err = ceilSecondsInt32("timeout", opts.Timeout)
+		if err != nil {
+			return nil, err
+		}
 	}
 	body := apiclient.ConnectSandbox{
-		Timeout: int32(timeout / time.Second),
+		Timeout: timeoutSec,
 		Memory:  mem,
 	}
-	resp, err := apiCli.PostSandboxesSandboxIDConnect(ctx, sandboxID, body) //nolint:staticcheck // v1 POST /sandboxes/{sandboxID}/connect is required on self-hosted runtime 2025.44..2026.30.
+	resp, err := apiCli.PostSandboxesSandboxIDConnect(ctx, sandboxID, body) // v1 POST /sandboxes/{sandboxID}/connect is required on self-hosted runtime 2025.44..2026.30.
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, sandboxID); err != nil {
 		return nil, err
 	}
@@ -1022,8 +1076,11 @@ func resumeSandbox(ctx context.Context, apiCli *apiclient.Client, sandboxID stri
 		return nil, err
 	}
 	body := apiclient.ResumedSandbox{Memory: mem}
-	if opts.Timeout > 0 {
-		sec := int32(opts.Timeout / time.Second)
+	if opts.Timeout != 0 {
+		sec, err := ceilSecondsInt32("timeout", opts.Timeout)
+		if err != nil {
+			return nil, err
+		}
 		body.Timeout = &sec
 	}
 	if opts.AutoPause != nil {
@@ -1038,11 +1095,11 @@ func resumeSandbox(ctx context.Context, apiCli *apiclient.Client, sandboxID stri
 		body.CpuCount = &cpu
 	}
 
-	resp, err := apiCli.PostSandboxesSandboxIDResume(ctx, sandboxID, body) //nolint:staticcheck // v1 POST /sandboxes/{sandboxID}/resume is required on self-hosted runtime < 2025.44.
+	resp, err := apiCli.PostSandboxesSandboxIDResume(ctx, sandboxID, body) // v1 POST /sandboxes/{sandboxID}/resume is required on self-hosted runtime < 2025.44.
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, sandboxID); err != nil {
 		return nil, err
 	}
@@ -1079,39 +1136,47 @@ func pauseSandbox(ctx context.Context, apiCli *apiclient.Client, sandboxID strin
 	if err != nil {
 		return false, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusConflict {
 		drainResponseBody(resp.Body)
 		return false, nil
 	}
-	if err := mapHTTPErr(resp, sandboxID); err != nil {
+	if err := finishNoContent(resp, sandboxID); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
 func setSandboxTimeout(ctx context.Context, apiCli *apiclient.Client, sandboxID string, d time.Duration) error {
-	body := apiclient.PostSandboxesSandboxIDTimeoutJSONRequestBody{Timeout: int32(d / time.Second)}
+	sec, err := ceilSecondsInt32("timeout", d)
+	if err != nil {
+		return err
+	}
+	body := apiclient.PostSandboxesSandboxIDTimeoutJSONRequestBody{Timeout: sec}
 	resp, err := apiCli.PostSandboxesSandboxIDTimeout(ctx, sandboxID, body)
 	if err != nil {
 		return mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
-	return mapHTTPErr(resp, sandboxID)
+	defer func() { _ = resp.Body.Close() }()
+	return finishNoContent(resp, sandboxID)
 }
 
 func refreshSandboxTimeout(ctx context.Context, apiCli *apiclient.Client, sandboxID string, duration time.Duration) error {
 	var body apiclient.PostSandboxesSandboxIDRefreshesJSONRequestBody
-	if duration > 0 {
-		sec := int(duration / time.Second)
-		body.Duration = &sec
+	if duration != 0 {
+		sec, err := ceilSecondsInt32("duration", duration)
+		if err != nil {
+			return err
+		}
+		s := int(sec)
+		body.Duration = &s
 	}
 	resp, err := apiCli.PostSandboxesSandboxIDRefreshes(ctx, sandboxID, body)
 	if err != nil {
 		return mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
-	return mapHTTPErr(resp, sandboxID)
+	defer func() { _ = resp.Body.Close() }()
+	return finishNoContent(resp, sandboxID)
 }
 
 func fetchSandboxInfo(ctx context.Context, apiCli *apiclient.Client, sandboxID string) (*SandboxInfo, error) {
@@ -1119,7 +1184,7 @@ func fetchSandboxInfo(ctx context.Context, apiCli *apiclient.Client, sandboxID s
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, sandboxID); err != nil {
 		return nil, err
 	}
@@ -1152,7 +1217,7 @@ func fetchSandboxMetrics(ctx context.Context, apiCli *apiclient.Client, sandboxI
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, sandboxID); err != nil {
 		return nil, err
 	}

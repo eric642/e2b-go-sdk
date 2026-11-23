@@ -26,9 +26,9 @@ func TestIntegrationNetworkDenyAllOut(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected egress-denied error, curl succeeded")
 	}
-	var cee *CommandExitError
-	var te *TimeoutError
-	if !errors.As(err, &cee) && !errors.As(err, &te) {
+	_, isExit := errors.AsType[*CommandExitError](err)
+	_, isTimeout := errors.AsType[*TimeoutError](err)
+	if !isExit && !isTimeout {
 		t.Fatalf("unexpected error type %T: %v", err, err)
 	}
 }

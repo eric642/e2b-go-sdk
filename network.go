@@ -178,8 +178,8 @@ func putSandboxNetwork(ctx context.Context, apiCli *apiclient.Client, sandboxID 
 	if err != nil {
 		return mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
-	return mapHTTPErr(resp, sandboxID)
+	defer func() { _ = resp.Body.Close() }()
+	return finishNoContent(resp, sandboxID)
 }
 
 func buildNetworkConfig(n *NetworkOptions) (*apiclient.SandboxNetworkConfig, error) {

@@ -31,8 +31,7 @@ func TestErrorInterfaceMembership(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var generic Error
-			if !errors.As(tc.e, &generic) {
+			if _, ok := errors.AsType[Error](tc.e); !ok {
 				t.Fatalf("%T should satisfy Error", tc.e)
 			}
 			if tc.e.Error() == "" {
@@ -71,10 +70,37 @@ func TestTimeoutErrorImplementsNetError(t *testing.T) {
 	if !e.Temporary() {
 		t.Fatal("Temporary() must return true")
 	}
+	if got := e.Error(); got != "e2b: timeout: slow" {
+		t.Fatalf("Error()=%q", got)
+	}
+
 	inner := errors.New("orig")
 	e2 := &TimeoutError{Message: "x", Cause: inner}
 	if !errors.Is(e2, inner) {
 		t.Fatal("Unwrap should surface Cause")
+	}
+	if got := e2.Error(); got != "e2b: timeout: x: orig" {
+		t.Fatalf("Error()=%q", got)
+	}
+
+	eCauseOnly := &TimeoutError{Cause: inner}
+	if got := eCauseOnly.Error(); got != "e2b: timeout: orig" {
+		t.Fatalf("cause-only Error()=%q", got)
+	}
+
+	eSameMsg := &TimeoutError{Message: "orig", Cause: inner}
+	if got := eSameMsg.Error(); got != "e2b: timeout: orig" {
+		t.Fatalf("same-msg Error()=%q (must not duplicate)", got)
+	}
+
+	eContained := &TimeoutError{Message: "slow", Cause: errors.New("deadline_exceeded: slow")}
+	if got := eContained.Error(); got != "e2b: timeout: slow" {
+		t.Fatalf("contained-msg Error()=%q (must not repeat message)", got)
+	}
+
+	eEmpty := &TimeoutError{}
+	if got := eEmpty.Error(); got != "e2b: timeout" {
+		t.Fatalf("empty Error()=%q", got)
 	}
 }
 
@@ -119,10 +145,44 @@ func TestBuildErrorUnwrap(t *testing.T) {
 	}
 }
 
-func TestFileUploadErrorIncludesPath(t *testing.T) {
-	e := &FileUploadError{Path: "/tmp/a", Message: "stall"}
-	if !strings.Contains(e.Error(), "/tmp/a") {
-		t.Fatalf("FileUploadError missing Path: %q", e.Error())
+func TestFileUploadErrorFormatAndUnwrap(t *testing.T) {
+	cause := errors.New("unexpected EOF")
+	cases := []struct {
+		name string
+		err  *FileUploadError
+		want string
+	}{
+		{"pathAndMsg", &FileUploadError{Path: "/tmp/a", Message: "stall"}, "e2b: file upload error: /tmp/a: stall"},
+		{"msgOnly", &FileUploadError{Message: "stall"}, "e2b: file upload error: stall"},
+		{"pathAndCause", &FileUploadError{Path: "/tmp/a", Cause: cause}, "e2b: file upload error: /tmp/a: unexpected EOF"},
+		{"causeOnly", &FileUploadError{Cause: cause}, "e2b: file upload error: unexpected EOF"},
+		{"all", &FileUploadError{Path: "/tmp/a", Message: "stall", Cause: cause}, "e2b: file upload error: /tmp/a: stall: unexpected EOF"},
+		{"empty", &FileUploadError{}, "e2b: file upload error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.err.Error(); got != tc.want {
+				t.Fatalf("Error()=%q, want %q", got, tc.want)
+			}
+			if tc.err.Cause != nil && !errors.Is(tc.err, cause) {
+				t.Fatal("FileUploadError.Unwrap should surface Cause")
+			}
+		})
+	}
+}
+
+func TestTypedErrorsUnwrapCause(t *testing.T) {
+	cause := errors.New("underlying")
+	for _, err := range []error{
+		&InvalidArgumentError{Message: "m", Cause: cause},
+		&AuthenticationError{Message: "m", Cause: cause},
+		&FileNotFoundError{Message: "m", Cause: cause},
+		&NotEnoughSpaceError{Message: "m", Cause: cause},
+		&RateLimitError{Message: "m", Cause: cause},
+	} {
+		if !errors.Is(err, cause) {
+			t.Errorf("%T did not unwrap Cause", err)
+		}
 	}
 }
 
@@ -159,10 +219,11 @@ func TestBaseErrorEmbeddingSatisfiesError(t *testing.T) {
 	if _, ok := errors.AsType[Error](err); !ok {
 		t.Fatal("type embedding BaseError should satisfy e2b.Error")
 	}
-	coder, ok := err.(interface {
+	coder, ok := errors.AsType[interface {
+		error
 		ErrorCode() string
 		HTTPStatus() int
-	})
+	}](err)
 	if !ok || coder.ErrorCode() != "conflict_code" || coder.HTTPStatus() != 409 {
 		t.Fatalf("BaseError accessors not promoted: %v", err)
 	}

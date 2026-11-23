@@ -1,6 +1,7 @@
 package e2b
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"io"
@@ -163,14 +164,21 @@ var defaultGitEnv = map[string]string{"GIT_TERMINAL_PROMPT": "0"}
 // Endpoint: process.Process/Start (envd Connect-RPC)
 // Envd: >= v0.1.0
 func (g *Git) Clone(ctx context.Context, repoURL string, opts GitCloneOptions) (*CommandResult, error) {
-	if opts.Password != "" && opts.Username == "" {
+	branch := cmp.Or(opts.Branch, opts.GitOptions.Branch)
+	username := cmp.Or(opts.Username, opts.GitOptions.Username)
+	password := cmp.Or(opts.Password, opts.GitOptions.Password)
+
+	if password != "" && username == "" {
 		return nil, &InvalidArgumentError{Message: "username is required when using a password or token for git clone"}
+	}
+	if err := rejectLeadingDash("branch name", branch); err != nil {
+		return nil, err
 	}
 
 	credURL := repoURL
-	if opts.Username != "" || opts.Password != "" {
+	if username != "" || password != "" {
 		var err error
-		credURL, err = withCredsChecked(repoURL, opts.Username, opts.Password)
+		credURL, err = withCredsChecked(repoURL, username, password)
 		if err != nil {
 			return nil, err
 		}
@@ -192,10 +200,10 @@ func (g *Git) Clone(ctx context.Context, repoURL string, opts GitCloneOptions) (
 	if opts.Depth > 0 {
 		args = append(args, "--depth", strconv.Itoa(opts.Depth))
 	}
-	if opts.Branch != "" {
-		args = append(args, "--branch", opts.Branch)
+	if branch != "" {
+		args = append(args, "--branch", branch)
 	}
-	args = append(args, credURL)
+	args = append(args, "--", credURL)
 	if opts.RepoPath != "" {
 		args = append(args, opts.RepoPath)
 	}
@@ -203,7 +211,7 @@ func (g *Git) Clone(ctx context.Context, repoURL string, opts GitCloneOptions) (
 	// Do not pass RepoPath as -C to git clone (destination may not exist yet).
 	cloneExecOpts := opts.GitOptions
 	cloneExecOpts.RepoPath = ""
-	res, err := g.run(ctx, args, cloneExecOpts)
+	res, err := g.runRemote(ctx, args, cloneExecOpts)
 	if err != nil {
 		return res, err
 	}
@@ -213,7 +221,7 @@ func (g *Git) Clone(ctx context.Context, repoURL string, opts GitCloneOptions) (
 		defer cancel()
 		scrubOpts := cloneExecOpts
 		scrubOpts.RepoPath = targetDir
-		if _, scrubErr := g.run(scrubCtx, []string{"remote", "set-url", "origin", cleanURL}, scrubOpts); scrubErr != nil {
+		if _, scrubErr := g.run(scrubCtx, []string{"remote", "set-url", "--", "origin", cleanURL}, scrubOpts); scrubErr != nil {
 			return res, scrubErr
 		}
 	}
@@ -226,19 +234,19 @@ func (g *Git) Clone(ctx context.Context, repoURL string, opts GitCloneOptions) (
 // Endpoint: process.Process/Start (envd Connect-RPC)
 // Envd: >= v0.1.0
 func (g *Git) Init(ctx context.Context, repoPath string, opts GitInitOptions) (*CommandResult, error) {
-	target := repoPath
-	if target == "" {
-		target = opts.RepoPath
-	}
+	target := cmp.Or(repoPath, opts.RepoPath)
 	args := []string{"init"}
 	if opts.InitialBranch != "" {
+		if err := rejectLeadingDash("initial branch name", opts.InitialBranch); err != nil {
+			return nil, err
+		}
 		args = append(args, "--initial-branch", opts.InitialBranch)
 	}
 	if opts.Bare {
 		args = append(args, "--bare")
 	}
 	if target != "" {
-		args = append(args, target)
+		args = append(args, "--", target)
 	}
 	execOpts := opts.GitOptions
 	execOpts.RepoPath = ""
@@ -253,24 +261,30 @@ func (g *Git) RemoteAdd(ctx context.Context, name, remoteURL string, opts GitRem
 	if name == "" || remoteURL == "" {
 		return nil, &InvalidArgumentError{Message: "both remote name and URL are required"}
 	}
+	if err := rejectLeadingDash("remote name", name); err != nil {
+		return nil, err
+	}
 	if !opts.Overwrite {
 		args := []string{"remote", "add"}
 		if opts.Fetch {
 			args = append(args, "-f")
 		}
-		args = append(args, name, remoteURL)
+		args = append(args, "--", name, remoteURL)
 		return g.run(ctx, args, opts.GitOptions)
 	}
 
-	res, err := g.run(ctx, []string{"remote", "add", name, remoteURL}, opts.GitOptions)
+	res, err := g.run(ctx, []string{"remote", "add", "--", name, remoteURL}, opts.GitOptions)
 	if err != nil {
-		res, err = g.run(ctx, []string{"remote", "set-url", name, remoteURL}, opts.GitOptions)
+		if _, ok := errors.AsType[*CommandExitError](err); !ok {
+			return res, err
+		}
+		res, err = g.run(ctx, []string{"remote", "set-url", "--", name, remoteURL}, opts.GitOptions)
 		if err != nil {
 			return res, err
 		}
 	}
 	if opts.Fetch {
-		return g.run(ctx, []string{"fetch", name}, opts.GitOptions)
+		return g.run(ctx, []string{"fetch", "--", name}, opts.GitOptions)
 	}
 	return res, nil
 }
@@ -283,7 +297,7 @@ func (g *Git) Add(ctx context.Context, pattern string, opts GitOptions) (*Comman
 	if pattern == "" {
 		pattern = "."
 	}
-	return g.run(ctx, []string{"add", pattern}, opts)
+	return g.run(ctx, []string{"add", "--", pattern}, opts)
 }
 
 // AddWithOptions stages multiple files (`git add -- <files...>`) or stages all
@@ -361,15 +375,21 @@ func (g *Git) runRemoteOp(ctx context.Context, subcmd string, setUpstream bool, 
 		}
 		return nil, &InvalidArgumentError{Message: "password is required when using a username for git " + subcmd}
 	}
+	if err := rejectLeadingDash("remote name", opts.Remote); err != nil {
+		return nil, err
+	}
+	if err := rejectLeadingDash("branch name", opts.Branch); err != nil {
+		return nil, err
+	}
 
 	buildArgs := func(remoteName string) []string {
 		args := []string{subcmd}
-		targetRemote := remoteName
-		if targetRemote == "" {
-			targetRemote = opts.Remote
-		}
+		targetRemote := cmp.Or(remoteName, opts.Remote)
 		if setUpstream && targetRemote != "" {
 			args = append(args, "--set-upstream")
+		}
+		if targetRemote != "" || opts.Branch != "" {
+			args = append(args, "--")
 		}
 		if targetRemote != "" {
 			args = append(args, targetRemote)
@@ -382,10 +402,10 @@ func (g *Git) runRemoteOp(ctx context.Context, subcmd string, setUpstream bool, 
 
 	if opts.Username != "" && opts.Password != "" {
 		return g.withTemporaryRemoteCreds(ctx, opts, func(remoteName string) (*CommandResult, error) {
-			return g.run(ctx, buildArgs(remoteName), opts)
+			return g.runRemote(ctx, buildArgs(remoteName), opts)
 		})
 	}
-	return g.run(ctx, buildArgs(""), opts)
+	return g.runRemote(ctx, buildArgs(""), opts)
 }
 
 // Status parses the porcelain output of `git status --porcelain`.
@@ -420,7 +440,10 @@ func (g *Git) CreateBranch(ctx context.Context, name string, opts GitOptions) (*
 	if name == "" {
 		return nil, &InvalidArgumentError{Message: "branch name is required"}
 	}
-	return g.run(ctx, []string{"branch", name}, opts)
+	if err := rejectLeadingDash("branch name", name); err != nil {
+		return nil, err
+	}
+	return g.run(ctx, []string{"branch", "--", name}, opts)
 }
 
 // DeleteBranch force-deletes a branch (`git branch -D <name>`). Use
@@ -432,7 +455,10 @@ func (g *Git) DeleteBranch(ctx context.Context, name string, opts GitOptions) (*
 	if name == "" {
 		return nil, &InvalidArgumentError{Message: "branch name is required"}
 	}
-	return g.run(ctx, []string{"branch", "-D", name}, opts)
+	if err := rejectLeadingDash("branch name", name); err != nil {
+		return nil, err
+	}
+	return g.run(ctx, []string{"branch", "-D", "--", name}, opts)
 }
 
 // DeleteBranchWithOptions deletes a branch using `-d` by default or `-D` when
@@ -444,11 +470,14 @@ func (g *Git) DeleteBranchWithOptions(ctx context.Context, name string, opts Git
 	if name == "" {
 		return nil, &InvalidArgumentError{Message: "branch name is required"}
 	}
+	if err := rejectLeadingDash("branch name", name); err != nil {
+		return nil, err
+	}
 	flag := "-d"
 	if opts.Force {
 		flag = "-D"
 	}
-	return g.run(ctx, []string{"branch", flag, name}, opts.GitOptions)
+	return g.run(ctx, []string{"branch", flag, "--", name}, opts.GitOptions)
 }
 
 // CheckoutBranch switches to an existing branch.
@@ -458,6 +487,9 @@ func (g *Git) DeleteBranchWithOptions(ctx context.Context, name string, opts Git
 func (g *Git) CheckoutBranch(ctx context.Context, name string, opts GitOptions) (*CommandResult, error) {
 	if name == "" {
 		return nil, &InvalidArgumentError{Message: "branch name is required"}
+	}
+	if err := rejectLeadingDash("branch name", name); err != nil {
+		return nil, err
 	}
 	return g.run(ctx, []string{"checkout", name}, opts)
 }
@@ -474,6 +506,9 @@ func (g *Git) Reset(ctx context.Context, opts GitResetOptions) (*CommandResult, 
 		return nil, &InvalidArgumentError{
 			Message: "reset mode must be one of: soft, mixed, hard, merge, keep",
 		}
+	}
+	if err := rejectLeadingDash("reset target", opts.Target); err != nil {
+		return nil, err
 	}
 	args := []string{"reset"}
 	if opts.Mode != "" {
@@ -496,6 +531,9 @@ func (g *Git) Reset(ctx context.Context, opts GitResetOptions) (*CommandResult, 
 func (g *Git) Restore(ctx context.Context, opts GitRestoreOptions) (*CommandResult, error) {
 	if len(opts.Paths) == 0 {
 		return nil, &InvalidArgumentError{Message: "at least one path is required for git restore"}
+	}
+	if err := rejectLeadingDash("restore source", opts.Source); err != nil {
+		return nil, err
 	}
 
 	staged := opts.Staged != nil && *opts.Staged
@@ -530,7 +568,10 @@ func (g *Git) GetRemoteURL(ctx context.Context, name string, opts GitOptions) (s
 	if name == "" {
 		name = "origin"
 	}
-	res, err := g.run(ctx, []string{"remote", "get-url", name}, opts)
+	if err := rejectLeadingDash("remote name", name); err != nil {
+		return "", err
+	}
+	res, err := g.run(ctx, []string{"remote", "get-url", "--", name}, opts)
 	if err != nil {
 		return "", err
 	}
@@ -545,7 +586,10 @@ func (g *Git) SetRemoteURL(ctx context.Context, name, remoteURL string, opts Git
 	if name == "" || remoteURL == "" {
 		return nil, &InvalidArgumentError{Message: "both remote name and URL are required"}
 	}
-	return g.run(ctx, []string{"remote", "set-url", name, remoteURL}, opts)
+	if err := rejectLeadingDash("remote name", name); err != nil {
+		return nil, err
+	}
+	return g.run(ctx, []string{"remote", "set-url", "--", name, remoteURL}, opts)
 }
 
 // SetConfig sets a git configuration entry in the requested scope (default
@@ -561,7 +605,7 @@ func (g *Git) SetConfig(ctx context.Context, key, value string, opts GitConfigOp
 	if err != nil {
 		return nil, err
 	}
-	return g.run(ctx, []string{"config", scopeFlag, key, value}, execOpts)
+	return g.run(ctx, []string{"config", scopeFlag, "--", key, value}, execOpts)
 }
 
 // GetConfig reads a git configuration entry in the requested scope (default
@@ -578,10 +622,9 @@ func (g *Git) GetConfig(ctx context.Context, key string, opts GitConfigOptions) 
 	if err != nil {
 		return "", err
 	}
-	res, err := g.run(ctx, []string{"config", scopeFlag, "--get", key}, execOpts)
+	res, err := g.run(ctx, []string{"config", scopeFlag, "--get", "--", key}, execOpts)
 	if err != nil {
-		var exitErr *CommandExitError
-		if errors.As(err, &exitErr) && exitErr.Result.ExitCode == 1 && strings.TrimSpace(exitErr.Result.Stderr) == "" {
+		if exitErr, ok := errors.AsType[*CommandExitError](err); ok && exitErr.Result.ExitCode == 1 && strings.TrimSpace(exitErr.Result.Stderr) == "" {
 			return "", nil
 		}
 		return "", err
@@ -612,7 +655,10 @@ func (g *Git) ConfigureUser(ctx context.Context, name, email string, opts GitCon
 // Endpoint: process.Process/Start (envd Connect-RPC)
 // Envd: >= v0.1.0
 func (g *Git) DangerouslyAuthenticate(ctx context.Context, opts GitDangerouslyAuthenticateOptions) (*CommandResult, error) {
-	if opts.Username == "" || opts.Password == "" {
+	username := cmp.Or(opts.Username, opts.GitOptions.Username)
+	password := cmp.Or(opts.Password, opts.GitOptions.Password)
+
+	if username == "" || password == "" {
 		return nil, &InvalidArgumentError{Message: "both username and password are required to authenticate git"}
 	}
 	host := strings.TrimSpace(opts.Host)
@@ -623,7 +669,7 @@ func (g *Git) DangerouslyAuthenticate(ctx context.Context, opts GitDangerouslyAu
 	if protocol == "" {
 		protocol = "https"
 	}
-	for _, v := range []string{protocol, host, opts.Username, opts.Password} {
+	for _, v := range []string{protocol, host, username, password} {
 		if strings.ContainsAny(v, "\r\n") {
 			return nil, &InvalidArgumentError{Message: "git credential fields must not contain newlines"}
 		}
@@ -638,8 +684,8 @@ func (g *Git) DangerouslyAuthenticate(ctx context.Context, opts GitDangerouslyAu
 	credInput := strings.Join([]string{
 		"protocol=" + protocol,
 		"host=" + host,
-		"username=" + opts.Username,
-		"password=" + opts.Password,
+		"username=" + username,
+		"password=" + password,
 		"",
 		"",
 	}, "\n")
@@ -708,14 +754,18 @@ func (g *Git) withTemporaryRemoteCreds(ctx context.Context, opts GitOptions, fn 
 	}
 	cleanURL := stripCreds(origURL)
 
-	if _, err := g.run(ctx, []string{"remote", "set-url", remoteName, credURL}, opts); err != nil {
+	if _, err := g.run(ctx, []string{"remote", "set-url", "--", remoteName, credURL}, opts); err != nil {
 		return nil, err
 	}
 	defer func() {
 		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
-		if _, restoreErr := g.run(restoreCtx, []string{"remote", "set-url", remoteName, cleanURL}, opts); restoreErr != nil && retErr == nil {
-			retErr = restoreErr
+		if _, restoreErr := g.run(restoreCtx, []string{"remote", "set-url", "--", remoteName, cleanURL}, opts); restoreErr != nil {
+			if retErr == nil {
+				retErr = restoreErr
+			} else {
+				retErr = errors.Join(retErr, restoreErr)
+			}
 		}
 	}()
 
@@ -724,6 +774,16 @@ func (g *Git) withTemporaryRemoteCreds(ctx context.Context, opts GitOptions, fn 
 
 func (g *Git) run(ctx context.Context, args []string, opts GitOptions) (*CommandResult, error) {
 	return g.runWithStdin(ctx, args, opts, nil)
+}
+
+func (g *Git) runRemote(ctx context.Context, args []string, opts GitOptions) (*CommandResult, error) {
+	res, err := g.runWithStdin(ctx, args, opts, nil)
+	if err != nil {
+		if exitErr, ok := errors.AsType[*CommandExitError](err); ok {
+			return res, classifyGitErr(exitErr)
+		}
+	}
+	return res, err
 }
 
 func (g *Git) runWithStdin(ctx context.Context, args []string, opts GitOptions, stdin io.Reader) (*CommandResult, error) {
@@ -747,19 +807,32 @@ func (g *Git) runWithStdin(ctx context.Context, args []string, opts GitOptions, 
 	}
 	h, err := g.cmds.Run(ctx, "git", runOpts)
 	if err != nil {
-		if exitErr, ok := err.(*CommandExitError); ok {
-			return &exitErr.Result, classifyGitErr(exitErr)
+		if exitErr, ok := errors.AsType[*CommandExitError](err); ok {
+			return &exitErr.Result, exitErr
 		}
 		return nil, err
 	}
-	res, err := h.Wait(ctx)
+	// Commands.Run (with Background: false) has already waited for the command
+	// stream to finish, so read the completed result without racing against ctx.
+	res, err := h.Wait(context.Background())
 	if err != nil {
-		if exitErr, ok := err.(*CommandExitError); ok {
-			return &exitErr.Result, classifyGitErr(exitErr)
+		if exitErr, ok := errors.AsType[*CommandExitError](err); ok {
+			return &exitErr.Result, exitErr
 		}
 		return nil, err
 	}
 	return res, nil
+}
+
+func rejectLeadingDash(field, value string) error {
+	if strings.HasPrefix(value, "-") {
+		return &InvalidArgumentError{Message: field + " must not start with '-'"}
+	}
+	return nil
+}
+
+func isHTTPSScheme(scheme string) bool {
+	return strings.EqualFold(scheme, "http") || strings.EqualFold(scheme, "https")
 }
 
 func withCredsChecked(rawURL, user, pass string) (string, error) {
@@ -770,7 +843,7 @@ func withCredsChecked(rawURL, user, pass string) (string, error) {
 		return "", &InvalidArgumentError{Message: "both username and password are required when using git credentials"}
 	}
 	scheme, _, ok := strings.Cut(rawURL, "://")
-	if !ok || (scheme != "http" && scheme != "https") {
+	if !ok || !isHTTPSScheme(scheme) {
 		return "", &InvalidArgumentError{Message: "only http(s) git URLs support username/password credentials"}
 	}
 	u, err := neturl.Parse(rawURL)
@@ -783,7 +856,7 @@ func withCredsChecked(rawURL, user, pass string) (string, error) {
 
 func stripCreds(rawURL string) string {
 	scheme, _, ok := strings.Cut(rawURL, "://")
-	if !ok || (scheme != "http" && scheme != "https") {
+	if !ok || !isHTTPSScheme(scheme) {
 		return rawURL
 	}
 	u, err := neturl.Parse(rawURL)
@@ -809,26 +882,30 @@ func deriveRepoDirFromURL(rawURL string) string {
 		seg = trimmed[idx+1:]
 	}
 	seg = strings.TrimSuffix(seg, ".git")
+	if seg == "" || seg == "." || seg == ".." {
+		return ""
+	}
 	return seg
 }
 
 func classifyGitErr(exit *CommandExitError) error {
 	msg := strings.ToLower(exit.Result.Stderr + "\n" + exit.Result.Stdout)
+	errMsg := cmp.Or(strings.TrimSpace(exit.Result.Stderr), strings.TrimSpace(exit.Result.Stdout))
 	switch {
 	case strings.Contains(msg, "authentication failed"),
-		strings.Contains(msg, "403"),
 		strings.Contains(msg, "could not read username"),
 		strings.Contains(msg, "terminal prompts disabled"),
 		strings.Contains(msg, "invalid username or password"),
 		strings.Contains(msg, "access denied"),
+		strings.Contains(msg, "permission denied"),
 		strings.Contains(msg, "not authorized"):
-		return &GitAuthError{Message: exit.Result.Stderr}
+		return &GitAuthError{Message: errMsg}
 	case strings.Contains(msg, "no upstream"),
 		strings.Contains(msg, "no tracking information"),
 		strings.Contains(msg, "set the remote as upstream"),
 		strings.Contains(msg, "set the upstream branch"),
 		strings.Contains(msg, "please specify which branch you want to merge with"):
-		return &GitUpstreamError{Message: exit.Result.Stderr}
+		return &GitUpstreamError{Message: errMsg}
 	}
 	return exit
 }
@@ -836,7 +913,8 @@ func classifyGitErr(exit *CommandExitError) error {
 func parseGitStatus(out string) *GitStatus {
 	s := &GitStatus{}
 	for line := range strings.SplitSeq(out, "\n") {
-		if len(line) < 3 {
+		line = strings.TrimSuffix(line, "\r")
+		if len(line) < 4 {
 			continue
 		}
 		x, y, rest := line[0], line[1], line[3:]

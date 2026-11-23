@@ -148,7 +148,7 @@ func fetchSandboxLogsV2(ctx context.Context, apiCli *apiclient.Client, sandboxID
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, sandboxID); err != nil {
 		return nil, err
 	}
@@ -177,11 +177,11 @@ func fetchSandboxLogsV1(ctx context.Context, apiCli *apiclient.Client, sandboxID
 		}
 	}
 
-	resp, err := apiCli.GetSandboxesSandboxIDLogs(ctx, sandboxID, params) //nolint:staticcheck // v1 GET /sandboxes/{sandboxID}/logs is preserved for self-hosted runtime < 2026.07.
+	resp, err := apiCli.GetSandboxesSandboxIDLogs(ctx, sandboxID, params) // v1 GET /sandboxes/{sandboxID}/logs is preserved for self-hosted runtime < 2026.07.
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, sandboxID); err != nil {
 		return nil, err
 	}

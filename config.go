@@ -1,7 +1,9 @@
 package e2b
 
 import (
+	"fmt"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -172,13 +174,43 @@ func (c Config) resolve() Config {
 	if out.RequestTimeout == 0 && !out.RequestTimeoutDisabled {
 		out.RequestTimeout = DefaultRequestTimeout
 	}
+	out.Headers = canonicalizeHeaders(out.Headers)
 	if out.Headers == nil {
 		out.Headers = map[string]string{}
 	}
 	if _, ok := out.Headers["User-Agent"]; !ok {
 		out.Headers["User-Agent"] = userAgent()
 	}
+	if out.ExtraSandboxHeaders != nil {
+		out.ExtraSandboxHeaders = canonicalizeHeaders(out.ExtraSandboxHeaders)
+	}
 	return out
+}
+
+func canonicalizeHeaders(src map[string]string) map[string]string {
+	if src == nil {
+		return nil
+	}
+	out := make(map[string]string, len(src))
+	for k, v := range src {
+		ck := http.CanonicalHeaderKey(k)
+		if _, exists := out[ck]; !exists || k == ck {
+			out[ck] = v
+		}
+	}
+	return out
+}
+
+func headerLookup(m map[string]string, canonicalKey string) (string, bool) {
+	if v, ok := m[canonicalKey]; ok {
+		return v, true
+	}
+	for k, v := range m {
+		if http.CanonicalHeaderKey(k) == canonicalKey {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 func userAgent() string {
@@ -195,23 +227,25 @@ func (c Config) retries() int {
 func (c Config) envdHeaders() map[string]string {
 	out := make(map[string]string, len(c.ExtraSandboxHeaders)+1)
 	ua := userAgent()
-	if v, ok := c.Headers["User-Agent"]; ok && v != "" {
+	if v, ok := headerLookup(c.Headers, "User-Agent"); ok && v != "" {
 		ua = v
 	}
 	out["User-Agent"] = ua
-	maps.Copy(out, c.ExtraSandboxHeaders)
+	for k, v := range c.ExtraSandboxHeaders {
+		out[http.CanonicalHeaderKey(k)] = v
+	}
 	return out
 }
 
 func (c Config) sandboxURL(sandboxID, sandboxDomain string) string {
 	if c.SandboxURL != "" {
-		return c.SandboxURL
+		return strings.TrimRight(c.SandboxURL, "/")
 	}
 	scheme := "https"
 	if c.Debug {
 		scheme = "http"
 	}
-	return scheme + "://" + c.sandboxHost(sandboxID, sandboxDomain, envdPort)
+	return strings.TrimRight(scheme+"://"+c.sandboxHost(sandboxID, sandboxDomain, envdPort), "/")
 }
 
 func (c Config) sandboxHost(sandboxID, sandboxDomain string, port int) string {
@@ -235,18 +269,33 @@ var (
 )
 
 func (c Config) baseTransport() *http.Transport {
-	key := transportKey{proxy: c.Proxy, httpVersion: c.HTTPVersion}
+	httpVer, _ := normalizeHTTPVersion(c.HTTPVersion)
+	var proxyURL *url.URL
+	var proxyKey string
+	if c.Proxy != "" {
+		u, err := parseProxyURL(c.Proxy)
+		if err != nil {
+			// Fail closed without caching invalid proxy configs in the global pool.
+			t := newBaseTransport(nil, httpVer)
+			t.Proxy = func(*http.Request) (*url.URL, error) { return nil, err }
+			return t
+		}
+		proxyURL = u
+		proxyKey = u.String()
+	}
+	key := transportKey{proxy: proxyKey, httpVersion: httpVer}
+
 	transportsMu.Lock()
 	defer transportsMu.Unlock()
 	if t, ok := transports[key]; ok {
 		return t
 	}
-	t := newBaseTransport(key)
+	t := newBaseTransport(proxyURL, httpVer)
 	transports[key] = t
 	return t
 }
 
-func newBaseTransport(key transportKey) *http.Transport {
+func newBaseTransport(proxyURL *url.URL, httpVer string) *http.Transport {
 	t := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
@@ -260,27 +309,20 @@ func newBaseTransport(key transportKey) *http.Transport {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
-	if key.proxy != "" {
-		u, err := parseProxyURL(key.proxy)
-		if err != nil {
-			t.Proxy = func(*http.Request) (*url.URL, error) { return nil, err }
-		} else {
-			t.Proxy = http.ProxyURL(u)
-		}
+	if proxyURL != nil {
+		t.Proxy = http.ProxyURL(proxyURL)
 	}
-	if v, err := normalizeHTTPVersion(key.httpVersion); err == nil {
-		switch v {
-		case HTTPVersion1:
-			var p http.Protocols
-			p.SetHTTP1(true)
-			t.Protocols = &p
-			t.ForceAttemptHTTP2 = false
-		case HTTPVersion2:
-			var p http.Protocols
-			p.SetHTTP1(true)
-			p.SetHTTP2(true)
-			t.Protocols = &p
-		}
+	switch httpVer {
+	case HTTPVersion1:
+		var p http.Protocols
+		p.SetHTTP1(true)
+		t.Protocols = &p
+		t.ForceAttemptHTTP2 = false
+	case HTTPVersion2:
+		var p http.Protocols
+		p.SetHTTP1(true)
+		p.SetHTTP2(true)
+		t.Protocols = &p
 	}
 	return t
 }
@@ -299,7 +341,7 @@ func parseProxyURL(raw string) (*url.URL, error) {
 	default:
 		return nil, &InvalidArgumentError{Message: "invalid Proxy " + strconv.Quote(raw) + ": unsupported scheme " + strconv.Quote(u.Scheme)}
 	}
-	if u.Host == "" {
+	if u.Hostname() == "" {
 		return nil, &InvalidArgumentError{Message: "invalid Proxy " + strconv.Quote(raw) + ": missing host"}
 	}
 	return u, nil
@@ -318,6 +360,9 @@ func normalizeHTTPVersion(v string) (string, error) {
 }
 
 func (c Config) validate() error {
+	if c.RequestTimeout < 0 {
+		return &InvalidArgumentError{Message: "RequestTimeout must not be negative"}
+	}
 	if c.HTTPClient == nil && c.Proxy != "" {
 		if _, err := parseProxyURL(c.Proxy); err != nil {
 			return err
@@ -329,6 +374,23 @@ func (c Config) validate() error {
 		}
 	}
 	return nil
+}
+
+func ceilSecondsInt32(field string, d time.Duration) (int32, error) {
+	if d < 0 {
+		return 0, &InvalidArgumentError{Message: fmt.Sprintf("%s must not be negative", field)}
+	}
+	if d == 0 {
+		return 0, nil
+	}
+	secs := int64(d / time.Second)
+	if d%time.Second != 0 {
+		secs++
+	}
+	if secs > math.MaxInt32 {
+		return 0, &InvalidArgumentError{Message: fmt.Sprintf("%s exceeds maximum (%ds)", field, math.MaxInt32)}
+	}
+	return int32(secs), nil
 }
 
 func (c Config) httpClient() *http.Client {
@@ -351,8 +413,9 @@ func (c Config) Clone() Config {
 	return out
 }
 
-// Validate checks that Proxy and HTTPVersion (when HTTPClient is nil) are
-// valid, returning *InvalidArgumentError otherwise.
+// Validate checks that RequestTimeout is non-negative and that Proxy and
+// HTTPVersion (when HTTPClient is nil) are valid, returning
+// *InvalidArgumentError otherwise.
 func (c Config) Validate() error { return c.validate() }
 
 // Resolve returns a Config copy with environment-variable fallbacks and
@@ -392,11 +455,33 @@ func (c Config) ControlPlaneHTTPClient() *http.Client {
 // wrapper and no client-wide Timeout, so long-lived envd streams (commands,
 // PTY, watch) and large uploads/downloads are not cut off. Callers bound
 // unary requests with a context deadline (typically RequestTimeout). When
-// HTTPClient is set it is returned unchanged.
+// HTTPClient is set it is returned unchanged unless its Transport is a
+// control-plane retry wrapper (e.g. from Client.HTTPClient()), in which case
+// a shallow copy is returned with the retry wrapper unwrapped and Timeout
+// cleared so data-plane traffic never inherits control-plane retries.
 //
 // Call it on a resolved Config (see Resolve).
 func (c Config) DataPlaneHTTPClient() *http.Client {
 	if c.HTTPClient != nil {
+		if rt, ok := c.HTTPClient.Transport.(*transport.RetryTransport); ok {
+			hc := *c.HTTPClient
+			var base http.RoundTripper
+			for {
+				if rt == nil {
+					base = nil
+					break
+				}
+				base = rt.Base
+				next, ok := base.(*transport.RetryTransport)
+				if !ok {
+					break
+				}
+				rt = next
+			}
+			hc.Transport = base
+			hc.Timeout = 0
+			return &hc
+		}
 		return c.HTTPClient
 	}
 	return &http.Client{Transport: c.baseTransport()}

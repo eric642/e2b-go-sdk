@@ -86,22 +86,19 @@ func (p *Pty) Create(ctx context.Context, opts PtyOptions) (*CommandHandle, erro
 		req.Header().Set("Connect-Timeout-Ms", strconv.Itoa(opts.TimeoutMs))
 	}
 
-	callCtx, optCancel := withEnvdCallOpts(ctx, p.sbx, opts.User, opts.RequestTimeout)
-	streamCtx, streamCancel := context.WithCancel(callCtx)
-	cancelAll := func() {
-		streamCancel()
-		optCancel()
-	}
+	streamCtx, clearStartTimeout, cancelAll := startStreamContext(ctx, p.sbx, opts.User, opts.RequestTimeout)
 
 	stream, err := p.sbx.envdClients().Process.Start(streamCtx, req)
 	if err != nil {
+		mapped := mapStreamErr(streamCtx, err)
 		cancelAll()
-		return nil, mapConnectErr(err)
+		return nil, mapped
 	}
-	handle := newCommandHandle(p.sbx, nil, nil, opts.OnData, true)
+	handle := newCommandHandle(p.sbx, nil, nil, opts.OnData, false)
 	handle.user = opts.User
+	handle.clearStartTimeout = clearStartTimeout
 	handle.cancel = cancelAll
-	handle.startStream(&startStream{s: stream})
+	handle.startStream(streamCtx, &startStream{s: stream})
 	return handle, nil
 }
 
@@ -126,7 +123,7 @@ func (p *Pty) ConnectByTag(ctx context.Context, tag string, opts PtyConnectOptio
 }
 
 func (p *Pty) connectSelector(ctx context.Context, selector *procpb.ProcessSelector, initialPID uint32, opts PtyConnectOptions) (*CommandHandle, error) {
-	return connectProcessSelector(ctx, p.sbx, selector, initialPID, opts.User, opts.TimeoutMs, opts.RequestTimeout, nil, nil, opts.OnData, true)
+	return connectProcessSelector(ctx, p.sbx, selector, initialPID, opts.User, opts.TimeoutMs, opts.RequestTimeout, nil, nil, opts.OnData, false)
 }
 
 // Resize changes the PTY terminal dimensions (columns and rows).
@@ -197,9 +194,8 @@ type PtyInputStream struct {
 // Endpoint: process.Process/StreamInput (envd Connect-RPC)
 // Envd: >= v0.1.0
 func (ps *PtyInputStream) SendPty(data []byte) error {
-	payload := append([]byte(nil), data...)
 	return ps.s.send(&procpb.ProcessInput{
-		Input: &procpb.ProcessInput_Pty{Pty: payload},
+		Input: &procpb.ProcessInput_Pty{Pty: data},
 	})
 }
 

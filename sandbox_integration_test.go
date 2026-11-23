@@ -118,8 +118,7 @@ func TestIntegrationKillNonExistent(t *testing.T) {
 	if err != nil {
 		// Accept the 401/403 if the key path fails entirely, but a
 		// well-authenticated client should hit 404 → (false, nil).
-		var ae *AuthenticationError
-		if !errors.As(err, &ae) {
+		if _, ok := errors.AsType[*AuthenticationError](err); !ok {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	}

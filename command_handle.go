@@ -1,10 +1,11 @@
 package e2b
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
+	"strings"
 	"sync"
 
 	"connectrpc.com/connect"
@@ -13,9 +14,11 @@ import (
 )
 
 // CommandHandle represents a running command or PTY session. Events arrive on
-// the channels returned by Stdout(), Stderr(), and PtyOutput(); the channels
-// close when the command exits, the stream fails, or Disconnect is called.
-// Call Wait to block and collect the final exit code.
+// the buffered channels returned by Stdout(), Stderr(), and PtyOutput() (with
+// non-blocking drops on slow consumers; use OnStdout/OnStderr/OnData or Wait
+// for guaranteed delivery); the channels close when the command exits, the
+// stream fails, or Disconnect is called. Call Wait to block and collect the
+// final exit code.
 type CommandHandle struct {
 	sbx  *Sandbox
 	user string
@@ -28,16 +31,17 @@ type CommandHandle struct {
 	onStderr func([]byte)
 	onPty    func([]byte)
 
-	retainOutput bool
-	cancel       context.CancelFunc
-	cancelOnce   sync.Once
-	started      chan struct{}
-	startedOnce  sync.Once
+	retainOutput      bool
+	clearStartTimeout func()
+	cancel            context.CancelFunc
+	cancelOnce        sync.Once
+	started           chan struct{}
+	startedOnce       sync.Once
 
 	mu           sync.Mutex
 	pid          uint32
-	stdout       []byte
-	stderr       []byte
+	stdout       strings.Builder
+	stderr       strings.Builder
 	result       *CommandResult
 	doneErr      error
 	done         chan struct{}
@@ -140,16 +144,31 @@ func (h *CommandHandle) resolveReqOpts(opts []CommandRequestOptions) CommandRequ
 	return o
 }
 
-// Stdout returns a channel of stdout byte slices. The channel is closed when
-// the command exits or the client stream ends.
+// Stdout returns a buffered channel (capacity 32) of stdout byte slices.
+// Sends are non-blocking: if the channel buffer is full because the consumer
+// is slow or not reading, incoming chunks are dropped without blocking the
+// event stream. Callers that need guaranteed delivery of every chunk should
+// use RunOptions.OnStdout / CommandConnectOptions.OnStdout or inspect
+// CommandResult.Stdout returned by Wait. The channel is closed when the
+// command exits or the client stream ends.
 func (h *CommandHandle) Stdout() <-chan []byte { return h.stdoutCh }
 
-// Stderr returns a channel of stderr byte slices. The channel is closed when
-// the command exits or the client stream ends.
+// Stderr returns a buffered channel (capacity 32) of stderr byte slices.
+// Sends are non-blocking: if the channel buffer is full because the consumer
+// is slow or not reading, incoming chunks are dropped without blocking the
+// event stream. Callers that need guaranteed delivery of every chunk should
+// use RunOptions.OnStderr / CommandConnectOptions.OnStderr or inspect
+// CommandResult.Stderr returned by Wait. The channel is closed when the
+// command exits or the client stream ends.
 func (h *CommandHandle) Stderr() <-chan []byte { return h.stderrCh }
 
-// PtyOutput returns a channel of PTY output byte slices. Empty for non-PTY
-// commands.
+// PtyOutput returns a buffered channel (capacity 32) of PTY output byte slices
+// (empty for non-PTY commands). Sends are non-blocking: if the channel buffer
+// is full because the consumer is slow or not reading, incoming chunks are
+// dropped without blocking the event stream. Callers that need guaranteed
+// delivery of every chunk should use PtyOptions.OnData or
+// PtyConnectOptions.OnData. The channel is closed when the PTY session exits
+// or the client stream ends.
 func (h *CommandHandle) PtyOutput() <-chan []byte { return h.ptyCh }
 
 // Wait blocks until the command stream finishes, returns a *CommandResult, and
@@ -180,8 +199,13 @@ func (h *CommandHandle) Wait(ctx context.Context) (*CommandResult, error) {
 
 // Disconnect cancels the client event stream locally without killing the remote
 // process inside the sandbox. You can reconnect later via Commands.Connect or
-// Pty.Connect. Calling Disconnect multiple times is safe and idempotent; once
-// it returns, no further OnStdout/OnStderr/OnData callbacks are invoked.
+// Pty.Connect. Calling Disconnect multiple times is safe and idempotent.
+//
+// Stopping OnStdout/OnStderr/OnData callbacks is best-effort: Disconnect does
+// not hold locks around callback execution or wait for an in-flight callback to
+// return (so callbacks may safely call Disconnect re-entrantly without
+// deadlocking), and a callback already being dispatched concurrently may still
+// complete after Disconnect returns.
 func (h *CommandHandle) Disconnect() {
 	h.mu.Lock()
 	h.disconnected = true
@@ -247,16 +271,14 @@ func (h *CommandHandle) StreamInput(ctx context.Context, opts ...CommandRequestO
 // Endpoint: process.Process/CloseStdin (envd Connect-RPC)
 // Envd: >= v0.5.2
 func (h *CommandHandle) CloseStdin(ctx context.Context, opts ...CommandRequestOptions) error {
-	if compareEnvdVersions(h.sbx.envdVersionForGating(), envdEnvdClose) < 0 {
-		return &TemplateError{Message: fmt.Sprintf(
-			"closing stdin requires envd >= %s, but this sandbox runs %s; rebuild the template to use it",
-			envdEnvdClose, h.sbx.envdVersionRaw())}
+	if err := h.sbx.requireEnvdVersion(envdEnvdClose, "closing stdin"); err != nil {
+		return err
 	}
 	pid, err := h.waitPID(ctx)
 	if err != nil {
 		return err
 	}
-	return (&Commands{sbx: h.sbx}).CloseStdin(ctx, pid, h.resolveReqOpts(opts))
+	return (&Commands{sbx: h.sbx}).closeStdinChecked(ctx, pid, h.resolveReqOpts(opts))
 }
 
 // SendPty writes raw terminal bytes into this PTY session.
@@ -296,15 +318,15 @@ func (h *CommandHandle) ResizePty(ctx context.Context, cols, rows uint32, opts .
 	return (&Pty{sbx: h.sbx}).Resize(ctx, pid, cols, rows, h.resolveReqOpts(opts))
 }
 
-func (h *CommandHandle) startStream(stream eventStream) {
+func (h *CommandHandle) startStream(streamCtx context.Context, stream eventStream) {
 	go func() {
+		defer close(h.done)
+		defer h.markStarted()
 		defer h.invokeCancel()
 		defer func() { _ = stream.Close() }()
 		defer close(h.stdoutCh)
 		defer close(h.stderrCh)
 		defer close(h.ptyCh)
-		defer close(h.done)
-		defer h.markStarted()
 
 		for stream.Receive() {
 			if h.isDisconnected() {
@@ -316,6 +338,9 @@ func (h *CommandHandle) startStream(stream eventStream) {
 			}
 			switch e := ev.Event.(type) {
 			case *procpb.ProcessEvent_Start:
+				if h.clearStartTimeout != nil {
+					h.clearStartTimeout()
+				}
 				h.mu.Lock()
 				h.pid = e.Start.GetPid()
 				h.mu.Unlock()
@@ -323,6 +348,9 @@ func (h *CommandHandle) startStream(stream eventStream) {
 			case *procpb.ProcessEvent_Data:
 				h.handleDataEvent(e.Data)
 			case *procpb.ProcessEvent_End:
+				if h.clearStartTimeout != nil {
+					h.clearStartTimeout()
+				}
 				h.mu.Lock()
 				h.result = &CommandResult{
 					ExitCode: e.End.GetExitCode(),
@@ -335,16 +363,33 @@ func (h *CommandHandle) startStream(stream eventStream) {
 
 		streamErr := stream.Err()
 		h.mu.Lock()
-		if streamErr != nil && !errors.Is(streamErr, io.EOF) && !h.disconnected {
-			h.doneErr = mapConnectErr(streamErr)
+		if !h.disconnected {
+			if streamErr != nil && !errors.Is(streamErr, io.EOF) {
+				h.doneErr = mapStreamErr(streamCtx, streamErr)
+			} else if h.result == nil && streamCtx != nil {
+				if te, ok := errors.AsType[*TimeoutError](context.Cause(streamCtx)); ok {
+					h.doneErr = te
+				}
+			}
 		}
 		if h.retainOutput && h.result != nil {
-			h.result.Stdout = string(h.stdout)
-			h.result.Stderr = string(h.stderr)
+			h.result.Stdout = h.stdout.String()
+			h.result.Stderr = h.stderr.String()
 		}
-		h.stdout, h.stderr = nil, nil
+		h.stdout.Reset()
+		h.stderr.Reset()
 		h.mu.Unlock()
 	}()
+}
+
+func sendChunkNonBlocking(ch chan []byte, src []byte) {
+	if len(ch) == cap(ch) {
+		return
+	}
+	select {
+	case ch <- bytes.Clone(src):
+	default:
+	}
 }
 
 func (h *CommandHandle) handleDataEvent(d *procpb.ProcessEvent_DataEvent) {
@@ -353,41 +398,35 @@ func (h *CommandHandle) handleDataEvent(d *procpb.ProcessEvent_DataEvent) {
 	}
 	switch data := d.Output.(type) {
 	case *procpb.ProcessEvent_DataEvent_Stdout:
-		chunk := append([]byte(nil), data.Stdout...)
-		if h.retainOutput {
+		if h.retainOutput && len(data.Stdout) > 0 {
 			h.mu.Lock()
-			h.stdout = append(h.stdout, chunk...)
+			_, _ = h.stdout.Write(data.Stdout)
 			h.mu.Unlock()
 		}
 		if h.onStdout != nil && !h.isDisconnected() {
-			h.onStdout(chunk)
+			h.onStdout(bytes.Clone(data.Stdout))
 		}
-		select {
-		case h.stdoutCh <- chunk:
-		default:
+		if !h.isDisconnected() {
+			sendChunkNonBlocking(h.stdoutCh, data.Stdout)
 		}
 	case *procpb.ProcessEvent_DataEvent_Stderr:
-		chunk := append([]byte(nil), data.Stderr...)
-		if h.retainOutput {
+		if h.retainOutput && len(data.Stderr) > 0 {
 			h.mu.Lock()
-			h.stderr = append(h.stderr, chunk...)
+			_, _ = h.stderr.Write(data.Stderr)
 			h.mu.Unlock()
 		}
 		if h.onStderr != nil && !h.isDisconnected() {
-			h.onStderr(chunk)
+			h.onStderr(bytes.Clone(data.Stderr))
 		}
-		select {
-		case h.stderrCh <- chunk:
-		default:
+		if !h.isDisconnected() {
+			sendChunkNonBlocking(h.stderrCh, data.Stderr)
 		}
 	case *procpb.ProcessEvent_DataEvent_Pty:
-		chunk := append([]byte(nil), data.Pty...)
 		if h.onPty != nil && !h.isDisconnected() {
-			h.onPty(chunk)
+			h.onPty(bytes.Clone(data.Pty))
 		}
-		select {
-		case h.ptyCh <- chunk:
-		default:
+		if !h.isDisconnected() {
+			sendChunkNonBlocking(h.ptyCh, data.Pty)
 		}
 	}
 }

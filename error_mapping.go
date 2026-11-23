@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -19,26 +21,26 @@ func mapConnectErr(err error) error {
 	if ctxErr := contextErr(err); ctxErr != nil {
 		return ctxErr
 	}
-	var ce *connect.Error
-	if !errors.As(err, &ce) {
+	ce, ok := errors.AsType[*connect.Error](err)
+	if !ok {
 		return newSandboxError(err.Error(), err)
 	}
 	msg := ce.Message()
 	switch ce.Code() {
 	case connect.CodeInvalidArgument:
-		return &InvalidArgumentError{Message: msg}
+		return &InvalidArgumentError{Message: msg, Cause: err}
 	case connect.CodeUnauthenticated, connect.CodePermissionDenied:
-		return &AuthenticationError{Message: msg}
+		return &AuthenticationError{Message: msg, Cause: err}
 	case connect.CodeNotFound:
-		return &FileNotFoundError{Message: msg}
+		return &FileNotFoundError{Message: msg, Cause: err}
 	case connect.CodeResourceExhausted:
 		// envd returns ResourceExhausted for out-of-space and rate limit.
 		// Disk-full messages usually contain "no space" — treat those as
 		// NotEnoughSpaceError for parity with JS/Python.
 		if strings.Contains(strings.ToLower(msg), "no space") {
-			return &NotEnoughSpaceError{Message: msg}
+			return &NotEnoughSpaceError{Message: msg, Cause: err}
 		}
-		return &RateLimitError{Message: msg}
+		return &RateLimitError{Message: msg, Cause: err}
 	case connect.CodeUnavailable, connect.CodeCanceled, connect.CodeDeadlineExceeded:
 		return &TimeoutError{Message: msg, Cause: err}
 	}
@@ -135,7 +137,16 @@ func mapEnvdFileErr(resp *http.Response, path string) error {
 }
 
 func contextErr(err error) error {
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	if err == nil {
+		return nil
+	}
+	if te, ok := errors.AsType[*TimeoutError](err); ok {
+		return te
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return &TimeoutError{Message: err.Error(), Cause: err}
+	}
+	if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
 		return &TimeoutError{Message: err.Error(), Cause: err}
 	}
 	return nil

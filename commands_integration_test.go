@@ -83,8 +83,8 @@ func TestIntegrationCommandNonZeroExit(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for non-zero exit")
 	}
-	var cee *CommandExitError
-	if !errors.As(err, &cee) {
+	cee, ok := errors.AsType[*CommandExitError](err)
+	if !ok {
 		t.Fatalf("want *CommandExitError, got %T: %v", err, err)
 	}
 	if cee.Result.ExitCode != 7 {
@@ -181,8 +181,7 @@ func TestIntegrationCommandTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
-	var te *TimeoutError
-	if !errors.As(err, &te) {
+	if _, ok := errors.AsType[*TimeoutError](err); !ok {
 		t.Fatalf("want *TimeoutError, got %T: %v", err, err)
 	}
 }

@@ -3,8 +3,9 @@ package e2b
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/url"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -116,11 +117,11 @@ func (p *SandboxPaginator) NextItems(ctx context.Context) ([]SandboxInfo, error)
 		params.Order = &ord
 	}
 	if p.opts.Limit > 0 {
-		lim := apiclient.PaginationLimit(p.opts.Limit)
+		lim := p.opts.Limit
 		params.Limit = &lim
 	}
 	if p.next != "" {
-		tok := apiclient.PaginationNextToken(p.next)
+		tok := p.next
 		params.NextToken = &tok
 	}
 
@@ -128,7 +129,7 @@ func (p *SandboxPaginator) NextItems(ctx context.Context) ([]SandboxInfo, error)
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, ""); err != nil {
 		return nil, err
 	}
@@ -171,6 +172,12 @@ func (c *Client) List(_ context.Context, opts ...SandboxListOptions) *SandboxPag
 	var o SandboxListOptions
 	if len(opts) > 0 {
 		o = opts[0]
+		o.Metadata = maps.Clone(o.Metadata)
+		o.State = slices.Clone(o.State)
+		if o.StartedAfter != nil {
+			ts := *o.StartedAfter
+			o.StartedAfter = &ts
+		}
 	}
 	return &SandboxPaginator{c: c, opts: o, next: o.NextToken, hasNext: true}
 }
@@ -213,11 +220,11 @@ func (c *Client) ListV1(ctx context.Context, opts ...SandboxListV1Options) ([]Sa
 		}
 	}
 
-	resp, err := c.apiCli.GetSandboxes(ctx, params) //nolint:staticcheck // v1 GET /sandboxes is preserved for legacy self-hosted < 2025.31 deployments.
+	resp, err := c.apiCli.GetSandboxes(ctx, params) // v1 GET /sandboxes is preserved for legacy self-hosted < 2025.31 deployments.
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, ""); err != nil {
 		return nil, err
 	}
@@ -297,6 +304,6 @@ func encodeMetadataQuery(md map[string]string) string {
 	for k, v := range md {
 		parts = append(parts, url.QueryEscape(k)+"="+url.QueryEscape(v))
 	}
-	sort.Strings(parts)
+	slices.Sort(parts)
 	return strings.Join(parts, "&")
 }

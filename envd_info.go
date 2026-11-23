@@ -3,7 +3,6 @@ package e2b
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/eric642/e2b-go-sdk/internal/envdapi"
@@ -57,7 +56,10 @@ func (s *Sandbox) GetEnvs(ctx context.Context, opts ...CommandRequestOptions) (m
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		drainBody(resp.Body)
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 300 {
 		return nil, mapHTTPErr(resp, s.ID)
 	}
@@ -78,10 +80,8 @@ func (s *Sandbox) GetEnvs(ctx context.Context, opts ...CommandRequestOptions) (m
 // Endpoint: GET /metrics (envd)
 // Envd: >= v0.1.5
 func (s *Sandbox) GetEnvdMetrics(ctx context.Context, opts ...CommandRequestOptions) (*EnvdMetrics, error) {
-	if compareEnvdVersions(s.envdVersionForGating(), envdMetrics) < 0 {
-		return nil, &TemplateError{Message: fmt.Sprintf(
-			"envd metrics require envd >= %s, but this sandbox runs %s; rebuild the template to use GetEnvdMetrics",
-			envdMetrics, s.envdVersionRaw())}
+	if err := s.requireEnvdVersion(envdMetrics, "envd metrics"); err != nil {
+		return nil, err
 	}
 	o := firstCommandReqOpts(opts)
 	cli := s.envdClients()
@@ -95,7 +95,10 @@ func (s *Sandbox) GetEnvdMetrics(ctx context.Context, opts ...CommandRequestOpti
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		drainBody(resp.Body)
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 300 {
 		return nil, mapHTTPErr(resp, s.ID)
 	}

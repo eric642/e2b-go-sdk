@@ -63,7 +63,7 @@ func (s *Sandbox) GetMcpToken(ctx context.Context) (string, error) {
 func (c *Client) bootstrapMCP(ctx context.Context, sbx *Sandbox, mcpCfg map[string]any) error {
 	token, err := newUUIDv4()
 	if err != nil {
-		_, _ = c.Kill(context.WithoutCancel(ctx), sbx.ID)
+		c.killBestEffort(ctx, sbx.ID)
 		return newSandboxError("generate MCP gateway token", err)
 	}
 	if c.cfg.Debug {
@@ -75,7 +75,7 @@ func (c *Client) bootstrapMCP(ctx context.Context, sbx *Sandbox, mcpCfg map[stri
 
 	cfgJSON, err := json.Marshal(mcpCfg)
 	if err != nil {
-		_, _ = c.Kill(context.WithoutCancel(ctx), sbx.ID)
+		c.killBestEffort(ctx, sbx.ID)
 		return &InvalidArgumentError{Message: "marshal MCP config: " + err.Error()}
 	}
 
@@ -88,7 +88,7 @@ func (c *Client) bootstrapMCP(ctx context.Context, sbx *Sandbox, mcpCfg map[stri
 		},
 	})
 	if runErr != nil {
-		_, _ = c.Kill(context.WithoutCancel(ctx), sbx.ID)
+		c.killBestEffort(ctx, sbx.ID)
 		if exitErr, ok := errors.AsType[*CommandExitError](runErr); ok {
 			return &SandboxError{
 				Message: "failed to start MCP gateway: " + strings.TrimSpace(exitErr.Result.Stderr),

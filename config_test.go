@@ -2,6 +2,7 @@ package e2b
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/eric642/e2b-go-sdk/internal/transport"
 )
 
 func clearEnv(t *testing.T) {
@@ -497,5 +500,223 @@ func TestEnvdHeadersExcludeControlPlaneHeaders(t *testing.T) {
 	custom := Config{Headers: map[string]string{"User-Agent": "app/2"}}.resolve()
 	if custom.envdHeaders()["User-Agent"] != "app/2" {
 		t.Fatal("caller User-Agent should propagate to envd")
+	}
+}
+
+func TestConfigHeaderCanonicalization(t *testing.T) {
+	clearEnv(t)
+	cfg := Config{
+		Headers:             map[string]string{"user-agent": "lower-ua/1", "x-custom": "v"},
+		ExtraSandboxHeaders: map[string]string{"user-agent": "sbx-ua/2", "x-sbx": "s"},
+	}.resolve()
+	if len(cfg.Headers) != 2 || cfg.Headers["User-Agent"] != "lower-ua/1" || cfg.Headers["X-Custom"] != "v" {
+		t.Fatalf("Headers not canonicalized: %#v", cfg.Headers)
+	}
+	if _, dup := cfg.Headers["user-agent"]; dup {
+		t.Fatalf("duplicate lowercase user-agent in Headers: %#v", cfg.Headers)
+	}
+
+	envd := cfg.envdHeaders()
+	if len(envd) != 2 || envd["User-Agent"] != "sbx-ua/2" || envd["X-Sbx"] != "s" {
+		t.Fatalf("envdHeaders not canonicalized: %#v", envd)
+	}
+	if _, dup := envd["user-agent"]; dup {
+		t.Fatalf("duplicate lowercase user-agent in envdHeaders: %#v", envd)
+	}
+
+	// Also verify envdHeaders handles non-canonical keys on an unresolved Config.
+	unresolved := Config{
+		Headers:             map[string]string{"user-agent": "raw-ua/1"},
+		ExtraSandboxHeaders: map[string]string{"x-extra": "e"},
+	}
+	envd2 := unresolved.envdHeaders()
+	if envd2["User-Agent"] != "raw-ua/1" || envd2["X-Extra"] != "e" {
+		t.Fatalf("unresolved envdHeaders=%#v", envd2)
+	}
+}
+
+func TestSandboxURLTrimsTrailingSlash(t *testing.T) {
+	clearEnv(t)
+	for _, raw := range []string{"https://tunnel.ngrok.dev/", "https://tunnel.ngrok.dev///"} {
+		cfg := Config{SandboxURL: raw}.resolve()
+		if got := cfg.sandboxURL("sbx-1", ""); got != "https://tunnel.ngrok.dev" {
+			t.Fatalf("sandboxURL(%q)=%q, want without trailing slash", raw, got)
+		}
+	}
+}
+
+func TestParseProxyURLRejectsMissingHostname(t *testing.T) {
+	for _, in := range []string{"http://:8080", ":8080", "https://:443", "   "} {
+		if _, err := parseProxyURL(in); err == nil {
+			t.Errorf("parseProxyURL(%q) should fail", in)
+		} else if _, ok := errors.AsType[*InvalidArgumentError](err); !ok {
+			t.Errorf("parseProxyURL(%q) err=%T, want *InvalidArgumentError", in, err)
+		}
+	}
+}
+
+func TestBaseTransportNormalizesKeyAndSkipsCachingInvalidProxy(t *testing.T) {
+	clearEnv(t)
+	a := Config{Proxy: "proxy.norm.local:3128", HTTPVersion: "1"}.resolve().baseTransport()
+	b := Config{Proxy: " http://proxy.norm.local:3128 ", HTTPVersion: "HTTP/1.1"}.resolve().baseTransport()
+	c := Config{Proxy: "HTTP://proxy.norm.local:3128", HTTPVersion: "1.1"}.resolve().baseTransport()
+	if a != b || a != c {
+		t.Fatal("equivalent Proxy / HTTPVersion configs should share one pooled transport")
+	}
+
+	transportsMu.Lock()
+	before := len(transports)
+	transportsMu.Unlock()
+
+	bad := Config{Proxy: "ftp://never-cache.invalid:21"}.resolve().baseTransport()
+	req, _ := http.NewRequest(http.MethodGet, "https://api.e2b.app/sandboxes", nil)
+	if _, err := bad.Proxy(req); err == nil {
+		t.Fatal("invalid proxy must fail closed")
+	}
+
+	transportsMu.Lock()
+	after := len(transports)
+	transportsMu.Unlock()
+	if after != before {
+		t.Fatalf("invalid proxy transport cached in global pool: before=%d after=%d", before, after)
+	}
+}
+
+func TestConfigValidateRejectsNegativeRequestTimeout(t *testing.T) {
+	clearEnv(t)
+	for _, cfg := range []Config{
+		{APIKey: "k", RequestTimeout: -time.Second},
+		{APIKey: "k", RequestTimeout: -time.Nanosecond, HTTPClient: &http.Client{}},
+	} {
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("Validate(%+v) should fail", cfg)
+		} else if _, ok := errors.AsType[*InvalidArgumentError](err); !ok {
+			t.Errorf("Validate(%+v) err=%T, want *InvalidArgumentError", cfg, err)
+		}
+		if _, err := NewClient(cfg); err == nil {
+			t.Errorf("NewClient(%+v) should fail", cfg)
+		} else if _, ok := errors.AsType[*InvalidArgumentError](err); !ok {
+			t.Errorf("NewClient(%+v) err=%T, want *InvalidArgumentError", cfg, err)
+		}
+	}
+}
+
+func TestPassingClientHTTPClientDoesNotStackRetriesOrRetryDataPlane(t *testing.T) {
+	clearEnv(t)
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	baseHC := *srv.Client()
+	baseHC.Timeout = 5 * time.Second
+	retries := 2
+	orig, err := NewClient(Config{
+		APIKey:     "k",
+		APIURL:     srv.URL,
+		Retries:    &retries,
+		HTTPClient: &baseHC,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Pass orig.HTTPClient() (which carries a *transport.RetryTransport and Timeout)
+	// back into a new Config.
+	derived := Config{
+		APIKey:     "k",
+		APIURL:     srv.URL,
+		Retries:    &retries,
+		HTTPClient: orig.HTTPClient(),
+	}.resolve()
+
+	// Control plane must unwrap and apply retries once (1 + 2 = 3 attempts, not 3*3 = 9).
+	cp := derived.ControlPlaneHTTPClient()
+	cpRT, ok := cp.Transport.(*transport.RetryTransport)
+	if !ok {
+		t.Fatalf("ControlPlaneHTTPClient transport=%T, want *transport.RetryTransport", cp.Transport)
+	}
+	if _, nested := cpRT.Base.(*transport.RetryTransport); nested {
+		t.Fatal("ControlPlaneHTTPClient stacked *transport.RetryTransport")
+	}
+	calls.Store(0)
+	resp, err := cp.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("control-plane attempts=%d, want 3 (no stacked retries)", got)
+	}
+
+	// Data plane must strip *transport.RetryTransport and clear Timeout.
+	dp := derived.DataPlaneHTTPClient()
+	if dp == derived.HTTPClient {
+		t.Fatal("DataPlaneHTTPClient must clone client when unwrapping *RetryTransport")
+	}
+	if dp.Timeout != 0 {
+		t.Fatalf("DataPlaneHTTPClient Timeout=%v, want 0", dp.Timeout)
+	}
+	if _, stillRetrying := dp.Transport.(*transport.RetryTransport); stillRetrying {
+		t.Fatal("DataPlaneHTTPClient kept *transport.RetryTransport")
+	}
+	calls.Store(0)
+	resp, err = dp.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("data-plane attempts=%d, want 1 (no retries)", got)
+	}
+	// Original HTTPClient must not have been mutated.
+	if orig.HTTPClient().Timeout == 0 {
+		t.Fatal("orig.HTTPClient().Timeout was mutated")
+	}
+	if _, ok := orig.HTTPClient().Transport.(*transport.RetryTransport); !ok {
+		t.Fatal("orig.HTTPClient().Transport was mutated")
+	}
+}
+
+func TestCeilSecondsInt32(t *testing.T) {
+	cases := []struct {
+		name    string
+		d       time.Duration
+		want    int32
+		wantErr bool
+	}{
+		{"zero", 0, 0, false},
+		{"1ns", time.Nanosecond, 1, false},
+		{"500ms", 500 * time.Millisecond, 1, false},
+		{"1s", time.Second, 1, false},
+		{"1s+1ns", time.Second + time.Nanosecond, 2, false},
+		{"1500ms", 1500 * time.Millisecond, 2, false},
+		{"60s", 60 * time.Second, 60, false},
+		{"maxInt32", time.Duration(math.MaxInt32) * time.Second, math.MaxInt32, false},
+		{"maxInt32+1ns", time.Duration(math.MaxInt32)*time.Second + time.Nanosecond, 0, true},
+		{"maxInt64", time.Duration(math.MaxInt64), 0, true},
+		{"neg1ns", -time.Nanosecond, 0, true},
+		{"neg1s", -time.Second, 0, true},
+		{"minInt64", time.Duration(math.MinInt64), 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ceilSecondsInt32("timeout", tc.d)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ceilSecondsInt32(%v)=%d, want error", tc.d, got)
+				}
+				if _, ok := errors.AsType[*InvalidArgumentError](err); !ok {
+					t.Fatalf("ceilSecondsInt32(%v) err=%T, want *InvalidArgumentError", tc.d, err)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("ceilSecondsInt32(%v)=(%d,%v), want (%d,nil)", tc.d, got, err, tc.want)
+			}
+		})
 	}
 }

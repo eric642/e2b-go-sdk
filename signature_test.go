@@ -49,6 +49,15 @@ func TestGetSignatureRejectsNegativeExpiration(t *testing.T) {
 	}
 }
 
+func TestGetSignatureRejectsInvalidOperation(t *testing.T) {
+	for _, op := range []SignatureOperation{"", "delete", "READ", "WRITE"} {
+		_, err := GetSignature("/p", op, "tok", SignatureOptions{})
+		if _, ok := errors.AsType[*InvalidArgumentError](err); !ok {
+			t.Fatalf("GetSignature(op=%q): want *InvalidArgumentError, got %T (%v)", op, err, err)
+		}
+	}
+}
+
 // TestGetSignatureParity hard-codes a byte-for-byte reference signature
 // computed against the Python SDK's get_signature implementation. If this
 // breaks, the Go, JS, or Python signature algorithms have diverged and envd
@@ -181,5 +190,62 @@ func TestSignedURLsRejectExpirationWithoutAccessToken(t *testing.T) {
 				t.Fatalf("want *InvalidArgumentError, got %T: %v", err, err)
 			}
 		})
+	}
+}
+
+func TestBuildFileURLOmitsUsernameForNewEnvd(t *testing.T) {
+	sbx := &Sandbox{
+		ID: "sbx-1", Domain: "example.com", EnvdVersion: "0.5.7",
+		EnvdAccessToken: "tok", cfg: Config{Domain: "example.com"},
+	}
+	raw, err := sbx.buildFileURL("/p", SignatureWrite, SignatureOptions{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Query().Has("username") {
+		t.Fatalf("username should be omitted for envd>=0.4.0: %s", raw)
+	}
+	if !strings.HasPrefix(u.Query().Get("signature"), "v1_") {
+		t.Fatalf("signature still expected: %s", raw)
+	}
+}
+
+func TestBuildFileURLInjectsUsernameForOldEnvd(t *testing.T) {
+	sbx := &Sandbox{
+		ID: "sbx-1", Domain: "example.com", EnvdVersion: "0.3.0",
+		EnvdAccessToken: "tok", cfg: Config{Domain: "example.com"},
+	}
+	raw, err := sbx.buildFileURL("/p", SignatureWrite, SignatureOptions{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Query().Get("username") != defaultUser {
+		t.Fatalf("username should default to %q for envd<0.4.0: %s", defaultUser, raw)
+	}
+}
+
+func TestBuildFileURLKeepsExplicitUsername(t *testing.T) {
+	sbx := &Sandbox{
+		ID: "sbx-1", Domain: "example.com", EnvdVersion: "0.5.7",
+		EnvdAccessToken: "tok", cfg: Config{Domain: "example.com"},
+	}
+	raw, err := sbx.buildFileURL("/p", SignatureWrite, SignatureOptions{User: "alice"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Query().Get("username") != "alice" {
+		t.Fatalf("explicit username must survive: %s", raw)
 	}
 }

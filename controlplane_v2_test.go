@@ -265,8 +265,7 @@ func TestClientResumeV1AndConflict409(t *testing.T) {
 	}
 
 	_, err = c.ResumeV1(context.Background(), "sbx-paused", ResumeOptions{})
-	var ce *ConflictError
-	if !errors.As(err, &ce) || ce.ErrorCode() != "sandbox_already_running" {
+	if ce, ok := errors.AsType[*ConflictError](err); !ok || ce.ErrorCode() != "sandbox_already_running" {
 		t.Fatalf("want *ConflictError with code sandbox_already_running, got %T: %v", err, err)
 	}
 }
@@ -789,8 +788,7 @@ func TestMCPBootstrapSuccessAndFailureCleanup(t *testing.T) {
 		_, err = c.CreateV1(context.Background(), CreateOptions{
 			Mcp: map[string]any{"bad": true},
 		})
-		var se *SandboxError
-		if !errors.As(err, &se) || !strings.Contains(se.Error(), "bad config") {
+		if se, ok := errors.AsType[*SandboxError](err); !ok || !strings.Contains(se.Error(), "bad config") {
 			t.Fatalf("want *SandboxError containing stderr, got %T: %v", err, err)
 		}
 		if !killed.Load() {
@@ -837,8 +835,7 @@ func TestSandboxForkPartialSuccessAndValidation(t *testing.T) {
 	if results[0].Err != nil || results[0].Sandbox == nil || results[0].Sandbox.ID != "sbx-fork-1" {
 		t.Fatalf("result[0]: %+v", results[0])
 	}
-	var rle *RateLimitError
-	if !errors.As(results[1].Err, &rle) || rle.ErrorCode() != "sandbox_capacity_unavailable" {
+	if rle, ok := errors.AsType[*RateLimitError](results[1].Err); !ok || rle.ErrorCode() != "sandbox_capacity_unavailable" {
 		t.Fatalf("result[1] want *RateLimitError, got %T: %v", results[1].Err, results[1].Err)
 	}
 	if _, ok := errors.AsType[*NotFoundError](results[2].Err); !ok {
@@ -1373,5 +1370,128 @@ func TestClientHealthPackageSymmetryAndVariadics(t *testing.T) {
 	snaps, err := c.ListAllSnapshots(ctx)
 	if err != nil || len(snaps) != 1 || snaps[0].SnapshotID != "snap-1:default" {
 		t.Fatalf("Client.ListAllSnapshots zero opts: snaps=%+v err=%v", snaps, err)
+	}
+}
+
+func TestClientGetMetrics(t *testing.T) {
+	var gotStart, gotEnd string
+	mock := newRESTMock(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/sandboxes/sbx-m/metrics" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		gotStart = r.URL.Query().Get("start")
+		gotEnd = r.URL.Query().Get("end")
+		writeJSON(t, w, http.StatusOK, []map[string]any{
+			{
+				"cpuCount": 4, "cpuUsedPct": 33.5,
+				"diskTotal": 4096, "diskUsed": 512,
+				"memTotal": 8192, "memUsed": 1024, "memCache": 128,
+				"timestamp": "2026-01-01T00:00:00Z", "timestampUnix": 1767225600,
+			},
+		})
+	}))
+
+	c, err := NewClient(mock.Config)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	start := time.Unix(1700000000, 0).UTC()
+	end := time.Unix(1700003600, 0).UTC()
+	metrics, err := c.GetMetrics(context.Background(), "sbx-m", MetricsOptions{Start: start, End: end})
+	if err != nil {
+		t.Fatalf("Client.GetMetrics: %v", err)
+	}
+	if gotStart != "1700000000" || gotEnd != "1700003600" {
+		t.Fatalf("query start=%q end=%q, want 1700000000 / 1700003600", gotStart, gotEnd)
+	}
+	if len(metrics) != 1 || metrics[0].CPUCount != 4 || metrics[0].MemCache != 128 {
+		t.Fatalf("metrics = %+v", metrics)
+	}
+
+	dbgCli, err := NewClient(Config{Debug: true})
+	if err != nil {
+		t.Fatalf("NewClient(Debug): %v", err)
+	}
+	dbgMetrics, err := dbgCli.GetMetrics(context.Background(), "sbx-m")
+	if err != nil || dbgMetrics != nil {
+		t.Fatalf("Debug Client.GetMetrics = (%+v, %v), want (nil, nil)", dbgMetrics, err)
+	}
+}
+
+func TestSandboxUpdateNetwork(t *testing.T) {
+	var got apiclient.SandboxNetworkUpdateConfig
+	mock := newRESTMock(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/sandboxes/sbx-net/network" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		readJSON(t, r, &got)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	c, err := NewClient(mock.Config)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	sbx := &Sandbox{ID: "sbx-net", apiCli: c.apiCli}
+	if err := sbx.UpdateNetwork(context.Background(), NetworkUpdateOptions{
+		AllowOut:            []string{"api.example.com"},
+		DenyOut:             []string{AllTraffic},
+		AllowInternetAccess: new(false),
+	}); err != nil {
+		t.Fatalf("Sandbox.UpdateNetwork: %v", err)
+	}
+	if got.AllowOut == nil || len(*got.AllowOut) != 1 || (*got.AllowOut)[0] != "api.example.com" ||
+		got.DenyOut == nil || len(*got.DenyOut) != 1 || (*got.DenyOut)[0] != AllTraffic ||
+		got.AllowInternetAccess == nil || *got.AllowInternetAccess {
+		t.Fatalf("Sandbox.UpdateNetwork body = %+v", got)
+	}
+
+	if err := sbx.UpdateNetwork(context.Background(), NetworkUpdateOptions{
+		EgressProxy: &EgressProxyOptions{},
+	}); err == nil {
+		t.Fatal("expected *InvalidArgumentError for empty egress proxy address")
+	} else if _, ok := errors.AsType[*InvalidArgumentError](err); !ok {
+		t.Fatalf("want *InvalidArgumentError, got %T: %v", err, err)
+	}
+}
+
+func TestClientCreateSnapshot(t *testing.T) {
+	var gotBody apiclient.SandboxSnapshotRequest
+	var gotIdem string
+	mock := newRESTMock(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/sandboxes/sbx-snap/snapshots" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		gotIdem = r.Header.Get("Idempotency-Key")
+		readJSON(t, r, &gotBody)
+		writeJSON(t, w, http.StatusCreated, map[string]any{
+			"snapshotID": "team/cli-snap:v1",
+			"names":      []string{"team/cli-snap:v1"},
+		})
+	}))
+
+	c, err := NewClient(mock.Config)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	info, err := c.CreateSnapshot(context.Background(), "sbx-snap", CreateSnapshotOptions{
+		Name:           "cli-snap",
+		Mode:           SnapshotModeFull,
+		IdempotencyKey: "cli-snap-key-1",
+	})
+	if err != nil {
+		t.Fatalf("Client.CreateSnapshot: %v", err)
+	}
+	if info.SnapshotID != "team/cli-snap:v1" || len(info.Names) != 1 {
+		t.Fatalf("SnapshotInfo = %+v", info)
+	}
+	if gotIdem != "cli-snap-key-1" || gotBody.Name == nil || *gotBody.Name != "cli-snap" || gotBody.Memory == nil || !*gotBody.Memory {
+		t.Fatalf("request mismatch: idem=%q body=%+v", gotIdem, gotBody)
+	}
+
+	if _, err := c.CreateSnapshot(context.Background(), "sbx-snap", CreateSnapshotOptions{Mode: "invalid"}); err == nil {
+		t.Fatal("expected *InvalidArgumentError for invalid snapshot mode")
+	} else if _, ok := errors.AsType[*InvalidArgumentError](err); !ok {
+		t.Fatalf("want *InvalidArgumentError, got %T: %v", err, err)
 	}
 }

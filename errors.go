@@ -3,6 +3,7 @@ package e2b
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Error is the base interface implemented by every SDK-specific error.
@@ -67,7 +68,18 @@ type TimeoutError struct {
 	Cause   error
 }
 
-func (e *TimeoutError) Error() string   { return "e2b: timeout: " + e.Message }
+func (e *TimeoutError) Error() string {
+	switch {
+	case e.Message != "" && e.Cause != nil && !strings.Contains(e.Cause.Error(), e.Message):
+		return "e2b: timeout: " + e.Message + ": " + e.Cause.Error()
+	case e.Message != "":
+		return "e2b: timeout: " + e.Message
+	case e.Cause != nil:
+		return "e2b: timeout: " + e.Cause.Error()
+	default:
+		return "e2b: timeout"
+	}
+}
 func (e *TimeoutError) Unwrap() error   { return e.Cause }
 func (e *TimeoutError) Timeout() bool   { return true }
 func (e *TimeoutError) Temporary() bool { return true }
@@ -76,19 +88,25 @@ func (e *TimeoutError) Temporary() bool { return true }
 type InvalidArgumentError struct {
 	BaseError
 	Message string
+	Cause   error
 }
 
 func (e *InvalidArgumentError) Error() string { return "e2b: invalid argument: " + e.Message }
+func (e *InvalidArgumentError) Unwrap() error { return e.Cause }
 
 // NotEnoughSpaceError reports the sandbox has insufficient disk space.
 type NotEnoughSpaceError struct {
 	BaseError
 	Message string
+	Cause   error
 }
 
 func (e *NotEnoughSpaceError) Error() string { return "e2b: not enough space: " + e.Message }
+func (e *NotEnoughSpaceError) Unwrap() error { return e.Cause }
 
-// NotFoundError is deprecated. Prefer FileNotFoundError or SandboxNotFoundError.
+// NotFoundError reports a generic HTTP 404 when no resource-specific error type
+// applies. Prefer FileNotFoundError or SandboxNotFoundError for filesystem and
+// sandbox lookups.
 type NotFoundError struct {
 	BaseError
 	Message string
@@ -101,6 +119,7 @@ type FileNotFoundError struct {
 	BaseError
 	Path    string
 	Message string
+	Cause   error
 }
 
 func (e *FileNotFoundError) Error() string {
@@ -109,6 +128,7 @@ func (e *FileNotFoundError) Error() string {
 	}
 	return "e2b: file not found: " + e.Message
 }
+func (e *FileNotFoundError) Unwrap() error { return e.Cause }
 
 // SandboxNotFoundError reports that the sandbox is gone or never existed.
 type SandboxNotFoundError struct {
@@ -128,9 +148,11 @@ func (e *SandboxNotFoundError) Error() string {
 type AuthenticationError struct {
 	BaseError
 	Message string
+	Cause   error
 }
 
 func (e *AuthenticationError) Error() string { return "e2b: authentication failed: " + e.Message }
+func (e *AuthenticationError) Unwrap() error { return e.Cause }
 
 // GitAuthError specializes AuthenticationError for Git credential failures.
 type GitAuthError struct {
@@ -160,9 +182,11 @@ func (e *TemplateError) Error() string { return "e2b: template error: " + e.Mess
 type RateLimitError struct {
 	BaseError
 	Message string
+	Cause   error
 }
 
 func (e *RateLimitError) Error() string { return "e2b: rate limit: " + e.Message }
+func (e *RateLimitError) Unwrap() error { return e.Cause }
 
 // ConflictError reports HTTP 409 from the control plane (e.g. a resource that
 // already exists, an operation incompatible with the current state, or an
@@ -198,7 +222,21 @@ type FileUploadError struct {
 }
 
 func (e *FileUploadError) Error() string {
-	return fmt.Sprintf("e2b: file upload error: %s: %s", e.Path, e.Message)
+	var b strings.Builder
+	b.WriteString("e2b: file upload error")
+	if e.Path != "" {
+		b.WriteString(": ")
+		b.WriteString(e.Path)
+	}
+	if e.Message != "" {
+		b.WriteString(": ")
+		b.WriteString(e.Message)
+	}
+	if e.Cause != nil && e.Cause.Error() != e.Message {
+		b.WriteString(": ")
+		b.WriteString(e.Cause.Error())
+	}
+	return b.String()
 }
 func (e *FileUploadError) Unwrap() error { return e.Cause }
 

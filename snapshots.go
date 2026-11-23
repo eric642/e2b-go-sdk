@@ -82,11 +82,11 @@ func (p *SnapshotPaginator) NextItems(ctx context.Context) ([]SnapshotInfo, erro
 		Name:      nilIfEmpty(p.opts.Name),
 	}
 	if p.opts.Limit > 0 {
-		lim := apiclient.PaginationLimit(p.opts.Limit)
+		lim := p.opts.Limit
 		params.Limit = &lim
 	}
 	if p.next != "" {
-		tok := apiclient.PaginationNextToken(p.next)
+		tok := p.next
 		params.NextToken = &tok
 	}
 
@@ -94,7 +94,7 @@ func (p *SnapshotPaginator) NextItems(ctx context.Context) ([]SnapshotInfo, erro
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, ""); err != nil {
 		return nil, err
 	}
@@ -202,12 +202,12 @@ func (c *Client) DeleteSnapshot(ctx context.Context, snapshotID string) (bool, e
 	if err != nil {
 		return false, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		drainResponseBody(resp.Body)
 		return false, nil
 	}
-	if err := mapHTTPErr(resp, ""); err != nil {
+	if err := finishNoContent(resp, ""); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -240,7 +240,7 @@ func createSandboxSnapshot(ctx context.Context, apiCli *apiclient.Client, sandbo
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, sandboxID); err != nil {
 		return nil, err
 	}

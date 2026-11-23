@@ -72,12 +72,8 @@ func (c *Client) Health(ctx context.Context) error {
 	if err != nil {
 		return mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
-	if err := mapHTTPErr(resp, ""); err != nil {
-		return err
-	}
-	drainResponseBody(resp.Body)
-	return nil
+	defer func() { _ = resp.Body.Close() }()
+	return finishNoContent(resp, "")
 }
 
 // Create provisions a new sandbox via POST /v2/sandboxes and returns a *Sandbox
@@ -103,7 +99,7 @@ func (c *Client) Create(ctx context.Context, opts ...CreateOptions) (*Sandbox, e
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, ""); err != nil {
 		return nil, err
 	}
@@ -143,11 +139,11 @@ func (c *Client) CreateV1(ctx context.Context, opts ...CreateOptions) (*Sandbox,
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.apiCli.PostSandboxes(ctx, body) //nolint:staticcheck // v1 POST /sandboxes is required on all self-hosted runtime <= 2026.30 deployments.
+	resp, err := c.apiCli.PostSandboxes(ctx, body) // v1 POST /sandboxes is required on all self-hosted runtime <= 2026.30 deployments.
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, ""); err != nil {
 		return nil, err
 	}
@@ -164,8 +160,9 @@ func (c *Client) CreateV1(ctx context.Context, opts ...CreateOptions) (*Sandbox,
 
 // Connect attaches to an existing sandbox (running or paused) via
 // POST /v2/sandboxes/{sandboxID}/connect. If paused, the server resumes it.
-// When opts.Timeout <= 0, timeout is omitted so the server default applies. It
-// does not fall back to ConnectV1 or Resume on self-hosted servers.
+// When opts.Timeout == 0, timeout is omitted so the server default applies;
+// negative durations return *InvalidArgumentError. It does not fall back to
+// ConnectV1 or Resume on self-hosted servers.
 //
 // opts.Config is ignored (see Create).
 //
@@ -185,8 +182,9 @@ func (c *Client) Connect(ctx context.Context, sandboxID string, opts ...ConnectO
 }
 
 // ConnectV1 attaches to an existing sandbox (running or paused) via
-// POST /sandboxes/{sandboxID}/connect, resuming it if paused. If opts.Timeout <= 0,
-// DefaultSandboxTimeout (5 minutes) is sent.
+// POST /sandboxes/{sandboxID}/connect, resuming it if paused. If opts.Timeout
+// == 0, DefaultSandboxTimeout (5 minutes) is sent; negative durations return
+// *InvalidArgumentError.
 //
 // Marked soft-deprecated in newer OpenAPI specs in favor of Connect
 // (POST /v2/sandboxes/{sandboxID}/connect), this endpoint remains actively
@@ -352,7 +350,7 @@ func (c *Client) GetBatchMetrics(ctx context.Context, sandboxIDs []string) (map[
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, ""); err != nil {
 		return nil, err
 	}
@@ -383,15 +381,32 @@ func (c *Client) Kill(ctx context.Context, sandboxID string) (bool, error) {
 	if err != nil {
 		return false, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		drainResponseBody(resp.Body)
 		return false, nil
 	}
-	if err := mapHTTPErr(resp, sandboxID); err != nil {
+	if err := finishNoContent(resp, sandboxID); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+func (c *Client) killBestEffort(ctx context.Context, sandboxID string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	killCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), DefaultRequestTimeout)
+	defer cancel()
+	_, _ = c.Kill(killCtx, sandboxID)
+}
+
+func finishNoContent(resp *http.Response, sandboxID string) error {
+	if err := mapHTTPErr(resp, sandboxID); err != nil {
+		return err
+	}
+	drainResponseBody(resp.Body)
+	return nil
 }
 
 func drainResponseBody(body io.Reader) {

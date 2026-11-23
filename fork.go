@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/http"
 	"time"
 
 	apiclient "github.com/eric642/e2b-go-sdk/internal/api"
@@ -18,8 +19,10 @@ type ForkOptions struct {
 	// Count is the number of forked sandboxes to create (1..20). Zero omits
 	// count so the server default (1) applies.
 	Count int
-	// Timeout sets the lifetime of the forked sandboxes. <= 0 omits timeout so
-	// the server default applies.
+	// Timeout sets the lifetime of the forked sandboxes. 0 omits timeout so
+	// the server default applies. Sub-second positive durations round up to
+	// the next whole second; negative or out-of-range durations return
+	// *InvalidArgumentError.
 	Timeout time.Duration
 	// Metadata attaches optional key/value pairs when supported by the server.
 	Metadata map[string]string
@@ -55,20 +58,7 @@ type forkRequestPayload struct {
 // Compatibility: E2B Cloud; self-hosted runtime 2026.29..2026.30 (not in runtime < 2026.29).
 // Envd: >= v0.5.0
 func (c *Client) Fork(ctx context.Context, sandboxID string, opts ...ForkOptions) ([]ForkResult, error) {
-	var o ForkOptions
-	if len(opts) > 0 {
-		o = opts[0]
-	}
-	return forkSandbox(ctx, c.apiCli, sandboxID, o, func(created *apiclient.Sandbox) (*Sandbox, error) {
-		sbx, err := c.newSandbox(created)
-		if err != nil {
-			return nil, err
-		}
-		if o.Lifecycle != nil && o.Lifecycle.AutoResume {
-			sbx.autoResume = true
-		}
-		return sbx, nil
-	})
+	return forkSandbox(ctx, c.cfg, c.apiCli, c.dataCli, sandboxID, opts...)
 }
 
 // Fork checkpoints this running sandbox in place (preserving its ID and
@@ -79,36 +69,28 @@ func (c *Client) Fork(ctx context.Context, sandboxID string, opts ...ForkOptions
 // Compatibility: E2B Cloud; self-hosted runtime 2026.29..2026.30 (not in runtime < 2026.29).
 // Envd: >= v0.5.0
 func (s *Sandbox) Fork(ctx context.Context, opts ...ForkOptions) ([]ForkResult, error) {
-	var o ForkOptions
-	if len(opts) > 0 {
-		o = opts[0]
-	}
-	return forkSandbox(ctx, s.apiCli, s.ID, o, func(created *apiclient.Sandbox) (*Sandbox, error) {
-		sbx, err := newSandboxWithDeps(s.cfg, s.apiCli, s.httpCli, created)
-		if err != nil {
-			return nil, err
-		}
-		if o.Lifecycle != nil && o.Lifecycle.AutoResume {
-			sbx.autoResume = true
-		}
-		return sbx, nil
-	})
+	return forkSandbox(ctx, s.cfg, s.apiCli, s.httpCli, s.ID, opts...)
 }
 
 func forkSandbox(
 	ctx context.Context,
+	cfg Config,
 	apiCli *apiclient.Client,
+	dataCli *http.Client,
 	sandboxID string,
-	opts ForkOptions,
-	build func(*apiclient.Sandbox) (*Sandbox, error),
+	opts ...ForkOptions,
 ) ([]ForkResult, error) {
-	if opts.Count < 0 || opts.Count > maxForkCount {
+	var o ForkOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	if o.Count < 0 || o.Count > maxForkCount {
 		return nil, &InvalidArgumentError{
-			Message: fmt.Sprintf("fork count must be between 1 and %d (or 0 for default), got %d", maxForkCount, opts.Count),
+			Message: fmt.Sprintf("fork count must be between 1 and %d (or 0 for default), got %d", maxForkCount, o.Count),
 		}
 	}
 
-	autoPause, autoPauseMemory, autoResume, err := applyLifecycleOptions(opts.Lifecycle)
+	autoPause, autoPauseMemory, autoResume, err := applyLifecycleOptions(o.Lifecycle)
 	if err != nil {
 		return nil, err
 	}
@@ -118,19 +100,22 @@ func forkSandbox(
 		AutoPauseMemory: autoPauseMemory,
 		AutoResume:      autoResume,
 	}
-	if opts.Count > 0 {
-		cnt := int32(opts.Count)
+	if o.Count > 0 {
+		cnt := int32(o.Count)
 		payload.Count = &cnt
 	}
-	if opts.Timeout > 0 {
-		sec := int32(opts.Timeout / time.Second)
+	if o.Timeout != 0 {
+		sec, err := ceilSecondsInt32("timeout", o.Timeout)
+		if err != nil {
+			return nil, err
+		}
 		payload.Timeout = &sec
 	}
-	if len(opts.Metadata) > 0 {
-		payload.Metadata = maps.Clone(opts.Metadata)
+	if len(o.Metadata) > 0 {
+		payload.Metadata = maps.Clone(o.Metadata)
 	}
-	if len(opts.Envs) > 0 {
-		payload.EnvVars = maps.Clone(opts.Envs)
+	if len(o.Envs) > 0 {
+		payload.EnvVars = maps.Clone(o.Envs)
 	}
 
 	rawBody, err := json.Marshal(payload)
@@ -142,7 +127,7 @@ func forkSandbox(
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, sandboxID); err != nil {
 		return nil, err
 	}
@@ -163,10 +148,13 @@ func forkSandbox(
 			out = append(out, ForkResult{Err: decodeForkItemError(item.Error)})
 			continue
 		}
-		forked, bErr := build(item.Sandbox)
+		forked, bErr := newSandboxWithDeps(cfg, apiCli, dataCli, item.Sandbox)
 		if bErr != nil {
 			out = append(out, ForkResult{Err: bErr})
 			continue
+		}
+		if o.Lifecycle != nil && o.Lifecycle.AutoResume {
+			forked.autoResume = true
 		}
 		out = append(out, ForkResult{Sandbox: forked})
 	}

@@ -3,6 +3,7 @@ package e2b
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -105,6 +106,42 @@ func TestEnvdVersionForGating(t *testing.T) {
 	dbg := &Sandbox{EnvdVersion: "0.2.0", cfg: Config{Debug: true}}
 	if got := dbg.envdVersionForGating(); got != envdDebugFallback {
 		t.Errorf("debug gating version = %q want %q", got, envdDebugFallback)
+	}
+}
+
+func TestCheckAndRequireEnvdVersion(t *testing.T) {
+	if err := checkEnvdVersion("0.5.5", envdFileCompose, "composing files"); err != nil {
+		t.Fatalf("at minVer should succeed, got %v", err)
+	}
+	if err := checkEnvdVersion("0.6.13", envdFileCompose, "composing files"); err != nil {
+		t.Fatalf("above minVer should succeed, got %v", err)
+	}
+
+	err := checkEnvdVersion("0.5.4", envdFileCompose, "composing files")
+	te, ok := errors.AsType[*TemplateError](err)
+	if !ok {
+		t.Fatalf("below minVer err=%T, want *TemplateError", err)
+	}
+	wantMsg := "composing files requires envd >= 0.5.5, but this sandbox runs 0.5.4; rebuild the template to use it"
+	if te.Message != wantMsg {
+		t.Fatalf("Message=%q, want %q", te.Message, wantMsg)
+	}
+
+	sbxOld := &Sandbox{EnvdVersion: "0.5.1"}
+	if err := sbxOld.requireEnvdVersion(envdEnvdClose, "closing stdin"); err == nil {
+		t.Fatal("old sandbox should fail requireEnvdVersion")
+	} else if te, ok := errors.AsType[*TemplateError](err); !ok || te.Message != "closing stdin requires envd >= 0.5.2, but this sandbox runs 0.5.1; rebuild the template to use it" {
+		t.Fatalf("unexpected error: %#v", err)
+	}
+
+	sbxDebug := &Sandbox{EnvdVersion: "0.1.0", cfg: Config{Debug: true}}
+	if err := sbxDebug.requireEnvdVersion(envdWatchNetworkMounts, "watching network mounts"); err != nil {
+		t.Fatalf("debug sandbox should bypass version gate, got %v", err)
+	}
+
+	var nilSbx *Sandbox
+	if _, ok := errors.AsType[*TemplateError](nilSbx.requireEnvdVersion(envdEnvdClose, "closing stdin")); !ok {
+		t.Fatal("nil sandbox should fail version gate with *TemplateError")
 	}
 }
 

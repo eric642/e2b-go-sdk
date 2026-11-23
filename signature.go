@@ -3,6 +3,7 @@ package e2b
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
@@ -37,6 +38,11 @@ type SignatureOptions struct {
 //	raw = path:operation:user:envdAccessToken[:expiration]
 //	signature = "v1_" + base64std_nopad(sha256(raw))
 func GetSignature(filePath string, operation SignatureOperation, envdAccessToken string, opts SignatureOptions) (Signature, error) {
+	if operation != SignatureRead && operation != SignatureWrite {
+		return Signature{}, &InvalidArgumentError{
+			Message: fmt.Sprintf("signature operation must be %q or %q, got %q", SignatureRead, SignatureWrite, operation),
+		}
+	}
 	if envdAccessToken == "" {
 		return Signature{}, &InvalidArgumentError{Message: "envd access token is not set; cannot generate signature"}
 	}
@@ -52,7 +58,7 @@ func GetSignature(filePath string, operation SignatureOperation, envdAccessToken
 	}
 	raw := strings.Join(parts, ":")
 	sum := sha256.Sum256([]byte(raw))
-	encoded := strings.TrimRight(base64.StdEncoding.EncodeToString(sum[:]), "=")
+	encoded := base64.RawStdEncoding.EncodeToString(sum[:])
 	return Signature{Value: "v1_" + encoded, Expiration: expPtr}, nil
 }
 
@@ -86,31 +92,54 @@ func (s *Sandbox) SignedDownloadURL(filePath string, opts SignatureOptions) (str
 	return s.DownloadURL(filePath, opts)
 }
 
+type fileURLParams struct {
+	domain              string
+	accessToken         string
+	resolvedUser        string
+	filePath            string
+	op                  SignatureOperation
+	expirationInSeconds int
+	upload              bool
+}
+
 func (s *Sandbox) buildFileURL(filePath string, op SignatureOperation, opts SignatureOptions, upload bool) (string, error) {
 	if opts.ExpirationInSeconds < 0 {
 		return "", &InvalidArgumentError{Message: "signature expiration must be non-negative"}
 	}
 	domain, accessToken, gatingVer, _ := s.envdSnapshot()
-	if opts.ExpirationInSeconds > 0 && accessToken == "" {
+	return s.buildFileURLFromSnapshot(fileURLParams{
+		domain:              domain,
+		accessToken:         accessToken,
+		resolvedUser:        resolveEnvdUser(gatingVer, opts.User),
+		filePath:            filePath,
+		op:                  op,
+		expirationInSeconds: opts.ExpirationInSeconds,
+		upload:              upload,
+	})
+}
+
+func (s *Sandbox) buildFileURLFromSnapshot(p fileURLParams) (string, error) {
+	if p.expirationInSeconds < 0 {
+		return "", &InvalidArgumentError{Message: "signature expiration must be non-negative"}
+	}
+	if p.expirationInSeconds > 0 && p.accessToken == "" {
 		return "", &InvalidArgumentError{
 			Message: "signature expiration can only be used when the sandbox has an envd access token (Secure enabled)",
 		}
 	}
 
-	base := strings.TrimRight(s.cfg.sandboxURL(s.ID, domain), "/")
-	user := resolveEnvdUser(gatingVer, opts.User)
-
+	base := strings.TrimRight(s.cfg.sandboxURL(s.ID, p.domain), "/")
 	params := make([]string, 0, 4)
-	if !upload || filePath != "" {
-		params = append(params, "path="+url.QueryEscape(filePath))
+	if !p.upload || p.filePath != "" {
+		params = append(params, "path="+url.QueryEscape(p.filePath))
 	}
-	if user != "" {
-		params = append(params, "username="+url.QueryEscape(user))
+	if p.resolvedUser != "" {
+		params = append(params, "username="+url.QueryEscape(p.resolvedUser))
 	}
-	if accessToken != "" {
-		sig, err := GetSignature(filePath, op, accessToken, SignatureOptions{
-			User:                user,
-			ExpirationInSeconds: opts.ExpirationInSeconds,
+	if p.accessToken != "" {
+		sig, err := GetSignature(p.filePath, p.op, p.accessToken, SignatureOptions{
+			User:                p.resolvedUser,
+			ExpirationInSeconds: p.expirationInSeconds,
 		})
 		if err != nil {
 			return "", err

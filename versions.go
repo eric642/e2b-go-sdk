@@ -2,6 +2,7 @@ package e2b
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -129,6 +130,19 @@ func unaryEnvdTimeout(sbx *Sandbox, explicit time.Duration) time.Duration {
 		return sbx.cfg.RequestTimeout
 	}
 	return 0
+}
+
+func checkEnvdVersion(currentVer, minVer, feature string) error {
+	if compareEnvdVersions(currentVer, minVer) < 0 {
+		return &TemplateError{Message: fmt.Sprintf(
+			"%s requires envd >= %s, but this sandbox runs %s; rebuild the template to use it",
+			feature, minVer, currentVer)}
+	}
+	return nil
+}
+
+func (s *Sandbox) requireEnvdVersion(minVer, feature string) error {
+	return checkEnvdVersion(s.envdVersionForGating(), minVer, feature)
 }
 
 func resolveEnvdUser(envdVersion, requested string) string {

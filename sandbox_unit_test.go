@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -242,20 +246,20 @@ func TestSandboxCreateMapsHTTPErrors(t *testing.T) {
 		check  func(t *testing.T, err error)
 	}{
 		{http.StatusTooManyRequests, func(t *testing.T, err error) {
-			var rle *RateLimitError
-			if !errors.As(err, &rle) {
+			t.Helper()
+			if _, ok := errors.AsType[*RateLimitError](err); !ok {
 				t.Fatalf("want RateLimitError, got %T: %v", err, err)
 			}
 		}},
 		{http.StatusUnauthorized, func(t *testing.T, err error) {
-			var ae *AuthenticationError
-			if !errors.As(err, &ae) {
+			t.Helper()
+			if _, ok := errors.AsType[*AuthenticationError](err); !ok {
 				t.Fatalf("want AuthenticationError, got %T: %v", err, err)
 			}
 		}},
 		{http.StatusInternalServerError, func(t *testing.T, err error) {
-			var se *SandboxError
-			if !errors.As(err, &se) {
+			t.Helper()
+			if _, ok := errors.AsType[*SandboxError](err); !ok {
 				t.Fatalf("want *SandboxError, got %T: %v", err, err)
 			}
 		}},
@@ -341,8 +345,8 @@ func TestSandboxConnect404(t *testing.T) {
 		w.WriteHeader(404)
 	}))
 	_, err := Connect(context.Background(), "sbx-missing", ConnectOptions{Config: mock.Config})
-	var sne *SandboxNotFoundError
-	if !errors.As(err, &sne) {
+	sne, ok := errors.AsType[*SandboxNotFoundError](err)
+	if !ok {
 		t.Fatalf("want *SandboxNotFoundError, got %T: %v", err, err)
 	}
 	if sne.SandboxID != "sbx-missing" {
@@ -396,6 +400,22 @@ func TestPkgKillDebugShortCircuits(t *testing.T) {
 	}
 	if !ok {
 		t.Fatal("Debug Kill should return true without I/O")
+	}
+}
+
+func TestPkgKillDebugValidatesConfig(t *testing.T) {
+	for _, cfg := range []Config{
+		{Debug: true, Proxy: "ftp://bad.invalid:21"},
+		{Debug: true, RequestTimeout: -time.Second},
+		{Debug: true, HTTPVersion: "9.9"},
+	} {
+		ok, err := Kill(context.Background(), "sbx", ConnectOptions{Config: cfg})
+		if ok {
+			t.Fatalf("Kill(%+v) returned ok=true, want false", cfg)
+		}
+		if _, isInvalid := errors.AsType[*InvalidArgumentError](err); !isInvalid {
+			t.Fatalf("Kill(%+v) err=%T (%v), want *InvalidArgumentError", cfg, err, err)
+		}
 	}
 }
 
@@ -729,4 +749,257 @@ func newFakeSandboxWithServer(t *testing.T, h http.Handler) *Sandbox {
 	sbx.apiCli = apiCli
 	sbx.httpCli = hc
 	return sbx
+}
+
+func TestTimeoutCeilingAndValidation(t *testing.T) {
+	var (
+		mu                 sync.Mutex
+		createV2Timeouts   []int32
+		createV1Timeouts   []int32
+		connectV2Timeouts  []*int32
+		connectV1Timeouts  []int32
+		resumeTimeouts     []*int32
+		setTimeouts        []int32
+		refreshDurations   []*int
+		forkTimeouts       []*int32
+		unexpectedRequests atomic.Int32
+	)
+	mock := newRESTMock(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.URL.Path {
+		case "/v2/sandboxes":
+			var b apiclient.NewSandboxV2
+			readJSON(t, r, &b)
+			if b.Timeout != nil {
+				createV2Timeouts = append(createV2Timeouts, *b.Timeout)
+			}
+			writeJSON(t, w, http.StatusCreated, fakeSandboxResponse("sbx-t", "example.com", "tok", ""))
+		case "/sandboxes":
+			var b apiclient.NewSandbox
+			readJSON(t, r, &b)
+			if b.Timeout != nil {
+				createV1Timeouts = append(createV1Timeouts, *b.Timeout)
+			}
+			writeJSON(t, w, http.StatusCreated, fakeSandboxResponse("sbx-t", "example.com", "tok", ""))
+		case "/v2/sandboxes/sbx-t/connect":
+			var b apiclient.ConnectSandboxV2
+			readJSON(t, r, &b)
+			connectV2Timeouts = append(connectV2Timeouts, b.Timeout)
+			writeJSON(t, w, http.StatusOK, fakeSandboxResponse("sbx-t", "example.com", "tok", ""))
+		case "/sandboxes/sbx-t/connect":
+			var b apiclient.ConnectSandbox
+			readJSON(t, r, &b)
+			connectV1Timeouts = append(connectV1Timeouts, b.Timeout)
+			writeJSON(t, w, http.StatusOK, fakeSandboxResponse("sbx-t", "example.com", "tok", ""))
+		case "/sandboxes/sbx-t/resume":
+			var b apiclient.ResumedSandbox
+			readJSON(t, r, &b)
+			resumeTimeouts = append(resumeTimeouts, b.Timeout)
+			writeJSON(t, w, http.StatusCreated, fakeSandboxResponse("sbx-t", "example.com", "tok", ""))
+		case "/sandboxes/sbx-t/timeout":
+			var b apiclient.SandboxTimeoutRequest
+			readJSON(t, r, &b)
+			setTimeouts = append(setTimeouts, b.Timeout)
+			w.WriteHeader(http.StatusNoContent)
+		case "/sandboxes/sbx-t/refreshes":
+			var b apiclient.SandboxRefreshRequest
+			readJSON(t, r, &b)
+			refreshDurations = append(refreshDurations, b.Duration)
+			w.WriteHeader(http.StatusNoContent)
+		case "/sandboxes/sbx-t/fork":
+			var b forkRequestPayload
+			readJSON(t, r, &b)
+			forkTimeouts = append(forkTimeouts, b.Timeout)
+			writeJSON(t, w, http.StatusCreated, []map[string]any{
+				{"sandbox": fakeSandboxResponse("sbx-f", "example.com", "tok", "")},
+			})
+		default:
+			unexpectedRequests.Add(1)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+
+	c, err := NewClient(mock.Config)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx := context.Background()
+
+	// 1) Sub-second positive values round UP to 1s / 2s.
+	if _, err := c.Create(ctx, CreateOptions{Timeout: 500 * time.Millisecond}); err != nil {
+		t.Fatalf("Create(500ms): %v", err)
+	}
+	if _, err := c.CreateV1(ctx, CreateOptions{Timeout: 1500 * time.Millisecond}); err != nil {
+		t.Fatalf("CreateV1(1500ms): %v", err)
+	}
+	if _, err := c.Connect(ctx, "sbx-t", ConnectOptions{Timeout: 500 * time.Millisecond}); err != nil {
+		t.Fatalf("Connect(500ms): %v", err)
+	}
+	if _, err := c.ConnectV1(ctx, "sbx-t", ConnectOptions{Timeout: 1 * time.Millisecond}); err != nil {
+		t.Fatalf("ConnectV1(1ms): %v", err)
+	}
+	if _, err := c.Resume(ctx, "sbx-t", ResumeOptions{Timeout: 2500 * time.Millisecond}); err != nil {
+		t.Fatalf("Resume(2500ms): %v", err)
+	}
+	if err := c.SetTimeout(ctx, "sbx-t", 500*time.Millisecond); err != nil {
+		t.Fatalf("SetTimeout(500ms): %v", err)
+	}
+	if err := c.SetTimeout(ctx, "sbx-t", 0); err != nil {
+		t.Fatalf("SetTimeout(0): %v", err)
+	}
+	if err := c.RefreshTimeout(ctx, "sbx-t", 500*time.Millisecond); err != nil {
+		t.Fatalf("RefreshTimeout(500ms): %v", err)
+	}
+	if err := c.RefreshTimeout(ctx, "sbx-t", 0); err != nil {
+		t.Fatalf("RefreshTimeout(0): %v", err)
+	}
+	if _, err := c.Fork(ctx, "sbx-t", ForkOptions{Timeout: 500 * time.Millisecond}); err != nil {
+		t.Fatalf("Fork(500ms): %v", err)
+	}
+	if _, err := c.Fork(ctx, "sbx-t", ForkOptions{Timeout: 0}); err != nil {
+		t.Fatalf("Fork(0): %v", err)
+	}
+
+	if len(createV2Timeouts) != 1 || createV2Timeouts[0] != 1 {
+		t.Fatalf("Create(500ms) timeout=%v, want [1]", createV2Timeouts)
+	}
+	if len(createV1Timeouts) != 1 || createV1Timeouts[0] != 2 {
+		t.Fatalf("CreateV1(1500ms) timeout=%v, want [2]", createV1Timeouts)
+	}
+	if len(connectV2Timeouts) != 1 || connectV2Timeouts[0] == nil || *connectV2Timeouts[0] != 1 {
+		t.Fatalf("Connect(500ms) timeout=%v, want [1]", connectV2Timeouts)
+	}
+	if len(connectV1Timeouts) != 1 || connectV1Timeouts[0] != 1 {
+		t.Fatalf("ConnectV1(1ms) timeout=%v, want [1]", connectV1Timeouts)
+	}
+	if len(resumeTimeouts) != 1 || resumeTimeouts[0] == nil || *resumeTimeouts[0] != 3 {
+		t.Fatalf("Resume(2500ms) timeout=%v, want [3]", resumeTimeouts)
+	}
+	if len(setTimeouts) != 2 || setTimeouts[0] != 1 || setTimeouts[1] != 0 {
+		t.Fatalf("SetTimeout timeouts=%v, want [1 0]", setTimeouts)
+	}
+	if len(refreshDurations) != 2 || refreshDurations[0] == nil || *refreshDurations[0] != 1 || refreshDurations[1] != nil {
+		t.Fatalf("RefreshTimeout durations=%v, want [1 <nil>]", refreshDurations)
+	}
+	if len(forkTimeouts) != 2 || forkTimeouts[0] == nil || *forkTimeouts[0] != 1 || forkTimeouts[1] != nil {
+		t.Fatalf("Fork timeouts=%v, want [1 <nil>]", forkTimeouts)
+	}
+
+	// 2) Negative and >MaxInt32s durations are rejected client-side across all 7 sites.
+	overflow := time.Duration(math.MaxInt32)*time.Second + time.Nanosecond
+	badDurations := []time.Duration{-time.Nanosecond, -time.Second, overflow}
+	assertInvalid := func(name string, err error) {
+		t.Helper()
+		if _, ok := errors.AsType[*InvalidArgumentError](err); !ok {
+			t.Fatalf("%s: want *InvalidArgumentError, got %T (%v)", name, err, err)
+		}
+	}
+	for _, d := range badDurations {
+		_, err = c.Create(ctx, CreateOptions{Timeout: d})
+		assertInvalid("Create", err)
+		_, err = c.CreateV1(ctx, CreateOptions{Timeout: d})
+		assertInvalid("CreateV1", err)
+		_, err = c.Connect(ctx, "sbx-t", ConnectOptions{Timeout: d})
+		assertInvalid("Connect", err)
+		_, err = c.ConnectV1(ctx, "sbx-t", ConnectOptions{Timeout: d})
+		assertInvalid("ConnectV1", err)
+		_, err = c.Resume(ctx, "sbx-t", ResumeOptions{Timeout: d})
+		assertInvalid("Resume", err)
+		assertInvalid("SetTimeout", c.SetTimeout(ctx, "sbx-t", d))
+		assertInvalid("RefreshTimeout", c.RefreshTimeout(ctx, "sbx-t", d))
+		_, err = c.Fork(ctx, "sbx-t", ForkOptions{Timeout: d})
+		assertInvalid("Fork", err)
+	}
+	if unexpectedRequests.Load() != 0 {
+		t.Fatalf("unexpected requests: %d", unexpectedRequests.Load())
+	}
+}
+
+func TestSandboxConcurrentConnectAndGetters(t *testing.T) {
+	envdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(envdSrv.Close)
+
+	var seq atomic.Int32
+	apiMock := newRESTMock(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/sandboxes":
+			writeJSON(t, w, http.StatusCreated, fakeSandboxResponse("sbx-g", "d0.example.com", "tok-0", "tr-0"))
+		case "/v2/sandboxes/sbx-g/connect":
+			n := int(seq.Add(1))
+			ns := strconv.Itoa(n)
+			resp := fakeSandboxResponse("sbx-g", "d"+ns+".example.com", "tok-"+ns, "tr-"+ns)
+			resp["envdVersion"] = "0.6." + ns
+			writeJSON(t, w, http.StatusOK, resp)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	apiMock.Config.SandboxURL = envdSrv.URL
+
+	c, err := NewClient(apiMock.Config)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	sbx, err := c.Create(context.Background())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if sbx.CurrentDomain() != "d0.example.com" || sbx.CurrentEnvdAccessToken() != "tok-0" || sbx.CurrentTrafficAccessToken() != "tr-0" || sbx.CurrentEnvdVersion() != "v1.2.3" {
+		t.Fatalf("initial getters mismatch: domain=%q envd=%q traffic=%q ver=%q",
+			sbx.CurrentDomain(), sbx.CurrentEnvdAccessToken(), sbx.CurrentTrafficAccessToken(), sbx.CurrentEnvdVersion())
+	}
+
+	ctx := context.Background()
+	const iters = 30
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() {
+			for range iters {
+				if err := sbx.Connect(ctx); err != nil {
+					t.Errorf("Connect: %v", err)
+				}
+			}
+		})
+	}
+	wg.Go(func() {
+		for range iters * 2 {
+			if sbx.CurrentDomain() == "" || sbx.CurrentEnvdVersion() == "" || sbx.CurrentEnvdAccessToken() == "" || sbx.CurrentTrafficAccessToken() == "" {
+				t.Error("getter returned empty value during concurrent Connect")
+			}
+		}
+	})
+	wg.Wait()
+
+	// Verify atomic partial merge preserves fields omitted by a subsequent response.
+	partialDomain := "merged.example.com"
+	if err := sbx.applyConnectedSandbox(&apiclient.Sandbox{Domain: &partialDomain}); err != nil {
+		t.Fatalf("applyConnectedSandbox partial: %v", err)
+	}
+	if sbx.CurrentDomain() != partialDomain || sbx.CurrentEnvdAccessToken() == "" || sbx.CurrentTrafficAccessToken() == "" || sbx.CurrentEnvdVersion() == "" {
+		t.Fatalf("partial merge lost existing fields: domain=%q envd=%q traffic=%q ver=%q",
+			sbx.CurrentDomain(), sbx.CurrentEnvdAccessToken(), sbx.CurrentTrafficAccessToken(), sbx.CurrentEnvdVersion())
+	}
+}
+
+func TestSandboxIsRunningTrailingSlashSandboxURL(t *testing.T) {
+	var gotPath string
+	envdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(envdSrv.Close)
+
+	cfg := Config{Debug: true, SandboxURL: envdSrv.URL + "/"}.resolve()
+	sbx := &Sandbox{ID: "sbx-slash", cfg: cfg, httpCli: cfg.DataPlaneHTTPClient()}
+
+	ok, err := sbx.IsRunning(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("IsRunning: ok=%v err=%v", ok, err)
+	}
+	if gotPath != "/health" {
+		t.Fatalf("health request path = %q, want /health (no double slash)", gotPath)
+	}
 }

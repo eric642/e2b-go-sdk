@@ -14,7 +14,6 @@ import (
 // WatchHandle streams filesystem events from Filesystem.Watch and
 // Filesystem.WatchWithOptions.
 type WatchHandle struct {
-	ctx        context.Context
 	events     chan FilesystemEvent
 	done       chan struct{}
 	cancel     context.CancelFunc
@@ -60,11 +59,22 @@ func (w *WatchHandle) Stop(ctx context.Context) error {
 	}
 }
 
-func (w *WatchHandle) consume(stream *connect.ServerStreamForClient[fspb.WatchDirResponse]) {
-	defer w.invokeCancel()
-	defer func() { _ = stream.Close() }()
-	defer close(w.events)
+func (w *WatchHandle) recordErr(err error) {
+	if err == nil {
+		return
+	}
+	w.mu.Lock()
+	if !w.stopped && w.err == nil {
+		w.err = err
+	}
+	w.mu.Unlock()
+}
+
+func (w *WatchHandle) consume(ctx context.Context, stream *connect.ServerStreamForClient[fspb.WatchDirResponse]) {
 	defer close(w.done)
+	defer close(w.events)
+	defer func() { _ = stream.Close() }()
+	defer w.invokeCancel()
 	for stream.Receive() {
 		msg := stream.Msg()
 		if msg == nil {
@@ -75,17 +85,12 @@ func (w *WatchHandle) consume(stream *connect.ServerStreamForClient[fspb.WatchDi
 			if ev.Filesystem == nil {
 				continue
 			}
-			out := FilesystemEvent{
-				Name: ev.Filesystem.GetName(),
-				Type: fsEventFromPB(ev.Filesystem.GetType()),
-			}
-			if ev.Filesystem.Entry != nil {
-				out.Entry = entryInfoFromPB(ev.Filesystem.Entry)
-			}
-			if w.ctx != nil {
+			out := fsEventFromPBMessage(ev.Filesystem)
+			if ctx != nil {
 				select {
 				case w.events <- out:
-				case <-w.ctx.Done():
+				case <-ctx.Done():
+					w.recordErr(contextErr(ctx.Err()))
 					return
 				}
 			} else {
@@ -95,12 +100,21 @@ func (w *WatchHandle) consume(stream *connect.ServerStreamForClient[fspb.WatchDi
 		}
 	}
 	if err := stream.Err(); err != nil && !errors.Is(err, io.EOF) {
-		w.mu.Lock()
-		if !w.stopped {
-			w.err = mapConnectErr(err)
-		}
-		w.mu.Unlock()
+		w.recordErr(mapConnectErr(err))
+	} else if ctx != nil && ctx.Err() != nil {
+		w.recordErr(contextErr(ctx.Err()))
 	}
+}
+
+func fsEventFromPBMessage(ev *fspb.FilesystemEvent) FilesystemEvent {
+	out := FilesystemEvent{
+		Name: ev.GetName(),
+		Type: fsEventFromPB(ev.GetType()),
+	}
+	if ev.Entry != nil {
+		out.Entry = entryInfoFromPB(ev.Entry)
+	}
+	return out
 }
 
 func fsEventFromPB(t fspb.EventType) FilesystemEventType {

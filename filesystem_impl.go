@@ -5,14 +5,17 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -21,7 +24,29 @@ import (
 	"github.com/eric642/e2b-go-sdk/internal/transport"
 )
 
-const metadataHeaderPrefix = "X-Metadata-"
+const (
+	metadataHeaderPrefix     = "X-Metadata-"
+	maxDrainBytes            = 4 << 10
+	multipartPipeWaitTimeout = time.Second
+)
+
+func drainBody(body io.Reader) {
+	if body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxDrainBytes))
+}
+
+func withResolvedEnvdCallOpts(ctx context.Context, resolvedUser string, reqTimeout time.Duration) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = transport.WithEnvdUser(ctx, resolvedUser)
+	if reqTimeout > 0 {
+		return context.WithTimeout(ctx, reqTimeout)
+	}
+	return ctx, func() {}
+}
 
 // FsOptions holds per-call options across filesystem operations.
 type FsOptions struct {
@@ -62,11 +87,13 @@ type WatchOptions struct {
 	AllowNetworkMounts bool
 	User               string
 	TimeoutMs          int
-	RequestTimeout     time.Duration
+	// RequestTimeout bounds only the initial WatchDir start handshake (waiting
+	// for envd to establish the watch). Once started, the watch stays alive
+	// until ctx is canceled, TimeoutMs expires, or WatchHandle.Stop is called.
+	RequestTimeout time.Duration
 }
 
-func (f *Filesystem) applyHeaders(req *http.Request, resolvedUser string) {
-	_, accessToken, _, envdCli := f.sbx.envdSnapshot()
+func (f *Filesystem) applyHeaders(req *http.Request, accessToken string, envdCli *transport.EnvdClients, resolvedUser string) {
 	var auth transport.EnvdAuth
 	if envdCli != nil {
 		auth = envdCli.Auth
@@ -119,7 +146,7 @@ func (f *Filesystem) Exists(ctx context.Context, filePath string, opts FsOptions
 	if err == nil {
 		return true, nil
 	}
-	if _, ok := err.(*FileNotFoundError); ok {
+	if _, ok := errors.AsType[*FileNotFoundError](err); ok {
 		return false, nil
 	}
 	return false, err
@@ -139,17 +166,20 @@ func (f *Filesystem) IsDir(ctx context.Context, filePath string, opts FsOptions)
 
 // List returns the entries of a directory. opts.Depth controls how many
 // directory levels to descend; 0 means the default (1, immediate children).
-// A negative depth is rejected with *InvalidArgumentError, matching the
-// reference SDKs' depth>=1 rule.
+// A negative depth or a depth exceeding uint32 range is rejected with
+// *InvalidArgumentError, matching the reference SDKs' depth>=1 rule.
 //
 // Endpoint: filesystem.Filesystem/ListDir (envd Connect-RPC)
 // Envd: >= v0.1.0
 func (f *Filesystem) List(ctx context.Context, dirPath string, opts FsOptions) ([]EntryInfo, error) {
 	depth := opts.Depth
-	if depth == 0 {
+	switch {
+	case depth == 0:
 		depth = 1
-	} else if depth < 1 {
+	case depth < 1:
 		return nil, &InvalidArgumentError{Message: "depth should be at least 1"}
+	case int64(depth) > math.MaxUint32:
+		return nil, &InvalidArgumentError{Message: fmt.Sprintf("depth exceeds maximum (%d)", math.MaxUint32)}
 	}
 
 	callCtx, cancel := withEnvdCallOpts(ctx, f.sbx, opts.User, unaryEnvdTimeout(f.sbx, opts.effectiveTimeout()))
@@ -224,16 +254,14 @@ func (f *Filesystem) Rename(ctx context.Context, oldPath, newPath string, opts F
 
 // Read downloads and returns the entire file content as []byte.
 //
+// Because Read buffers the entire decompressed response in memory, prefer
+// ReadStream combined with io.LimitReader when reading untrusted, large, or
+// gzip-compressed files.
+//
 // Endpoint: GET /files (envd)
 // Envd: >= v0.1.0
 func (f *Filesystem) Read(ctx context.Context, filePath string, opts FsOptions) ([]byte, error) {
-	readCtx := ctx
-	if timeout := unaryEnvdTimeout(f.sbx, opts.effectiveTimeout()); timeout > 0 {
-		var cancel context.CancelFunc
-		readCtx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-	rc, err := f.ReadStream(readCtx, filePath, opts)
+	rc, err := f.readStream(ctx, filePath, opts, unaryEnvdTimeout(f.sbx, opts.effectiveTimeout()))
 	if err != nil {
 		return nil, err
 	}
@@ -247,6 +275,10 @@ func (f *Filesystem) Read(ctx context.Context, filePath string, opts FsOptions) 
 
 // ReadBytes is an explicit byte-slice alias for Read.
 //
+// Because ReadBytes buffers the entire decompressed response in memory, prefer
+// ReadStream combined with io.LimitReader when reading untrusted, large, or
+// gzip-compressed files.
+//
 // Endpoint: GET /files (envd)
 // Envd: >= v0.1.0
 func (f *Filesystem) ReadBytes(ctx context.Context, filePath string, opts FsOptions) ([]byte, error) {
@@ -254,6 +286,10 @@ func (f *Filesystem) ReadBytes(ctx context.Context, filePath string, opts FsOpti
 }
 
 // ReadString downloads and returns the entire file content as a string.
+//
+// Because ReadString buffers the entire decompressed response in memory, prefer
+// ReadStream combined with io.LimitReader when reading untrusted, large, or
+// gzip-compressed files.
 //
 // Endpoint: GET /files (envd)
 // Envd: >= v0.1.0
@@ -272,19 +308,30 @@ func (f *Filesystem) ReadString(ctx context.Context, filePath string, opts FsOpt
 // Endpoint: GET /files (envd)
 // Envd: >= v0.1.0
 func (f *Filesystem) ReadStream(ctx context.Context, filePath string, opts FsOptions) (io.ReadCloser, error) {
-	u, err := f.sbx.buildFileURL(filePath, SignatureRead, SignatureOptions{User: opts.User}, false)
+	return f.readStream(ctx, filePath, opts, opts.effectiveTimeout())
+}
+
+func (f *Filesystem) readStream(ctx context.Context, filePath string, opts FsOptions, timeout time.Duration) (io.ReadCloser, error) {
+	domain, accessToken, gatingVer, envdCli := f.sbx.envdSnapshot()
+	resolvedUser := resolveEnvdUser(gatingVer, opts.User)
+	u, err := f.sbx.buildFileURLFromSnapshot(fileURLParams{
+		domain:       domain,
+		accessToken:  accessToken,
+		resolvedUser: resolvedUser,
+		filePath:     filePath,
+		op:           SignatureRead,
+	})
 	if err != nil {
 		return nil, err
 	}
-	resolvedUser := resolveEnvdUser(f.sbx.envdVersionForGating(), opts.User)
-	callCtx, cancel := withEnvdCallOpts(ctx, f.sbx, opts.User, opts.effectiveTimeout())
+	callCtx, cancel := withResolvedEnvdCallOpts(ctx, resolvedUser, timeout)
 
 	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, u, nil)
 	if err != nil {
 		cancel()
 		return nil, newSandboxError("build file request", err)
 	}
-	f.applyHeaders(req, resolvedUser)
+	f.applyHeaders(req, accessToken, envdCli, resolvedUser)
 	if opts.Gzip {
 		req.Header.Set("Accept-Encoding", "gzip")
 	}
@@ -295,7 +342,10 @@ func (f *Filesystem) ReadStream(ctx context.Context, filePath string, opts FsOpt
 		return nil, mapHTTPOrCtx(err)
 	}
 	if resp.StatusCode >= 300 {
-		defer func() { _ = resp.Body.Close() }()
+		defer func() {
+			drainBody(resp.Body)
+			_ = resp.Body.Close()
+		}()
 		defer cancel()
 		return nil, mapEnvdFileErr(resp, filePath)
 	}
@@ -341,10 +391,7 @@ func (g *gzipStreamReadCloser) Close() error {
 	if g.cancel != nil {
 		g.cancel()
 	}
-	if gzErr != nil {
-		return gzErr
-	}
-	return bodyErr
+	return errors.Join(gzErr, bodyErr)
 }
 
 // Write creates or overwrites a file with the contents of r and returns the
@@ -352,12 +399,14 @@ func (g *gzipStreamReadCloser) Close() error {
 //
 // The upload encoding is gated on the envd version unless opts.ForceMultipart
 // is set: envd >= v0.5.7 accepts a raw application/octet-stream body, while
-// older envd builds use streaming multipart/form-data.
+// older envd builds use streaming multipart/form-data. On error, r may still be
+// read briefly by a background goroutine (including net/http and multipart pipe
+// streaming); do not reuse r until it returns EOF or is closed.
 //
 // Endpoint: POST /files (envd)
 // Envd: >= v0.1.0 (octet-stream >= v0.5.7; metadata >= v0.6.2)
 func (f *Filesystem) Write(ctx context.Context, filePath string, r io.Reader, opts FsOptions) (*WriteInfo, error) {
-	return f.uploadOne(ctx, filePath, r, opts)
+	return f.uploadOne(ctx, filePath, r, opts, opts.effectiveTimeout())
 }
 
 // WriteBytes creates or overwrites a file with data.
@@ -365,7 +414,7 @@ func (f *Filesystem) Write(ctx context.Context, filePath string, r io.Reader, op
 // Endpoint: POST /files (envd)
 // Envd: >= v0.1.0 (octet-stream >= v0.5.7; metadata >= v0.6.2)
 func (f *Filesystem) WriteBytes(ctx context.Context, filePath string, data []byte, opts FsOptions) (*WriteInfo, error) {
-	return f.Write(ctx, filePath, bytes.NewReader(data), opts)
+	return f.uploadOne(ctx, filePath, bytes.NewReader(data), opts, unaryEnvdTimeout(f.sbx, opts.effectiveTimeout()))
 }
 
 // WriteString creates or overwrites a file with string data.
@@ -373,7 +422,7 @@ func (f *Filesystem) WriteBytes(ctx context.Context, filePath string, data []byt
 // Endpoint: POST /files (envd)
 // Envd: >= v0.1.0 (octet-stream >= v0.5.7; metadata >= v0.6.2)
 func (f *Filesystem) WriteString(ctx context.Context, filePath, data string, opts FsOptions) (*WriteInfo, error) {
-	return f.Write(ctx, filePath, strings.NewReader(data), opts)
+	return f.uploadOne(ctx, filePath, strings.NewReader(data), opts, unaryEnvdTimeout(f.sbx, opts.effectiveTimeout()))
 }
 
 // WriteFiles writes multiple files sequentially, creating parent directories
@@ -385,9 +434,10 @@ func (f *Filesystem) WriteString(ctx context.Context, filePath, data string, opt
 // Endpoint: POST /files (envd)
 // Envd: >= v0.1.0 (octet-stream >= v0.5.7; metadata >= v0.6.2)
 func (f *Filesystem) WriteFiles(ctx context.Context, entries []WriteEntry, opts FsOptions) ([]WriteInfo, error) {
+	timeout := unaryEnvdTimeout(f.sbx, opts.effectiveTimeout())
 	out := make([]WriteInfo, 0, len(entries))
 	for _, e := range entries {
-		info, err := f.uploadOne(ctx, e.Path, bytes.NewReader(e.Data), opts)
+		info, err := f.uploadOne(ctx, e.Path, bytes.NewReader(e.Data), opts, timeout)
 		if err != nil {
 			return out, err
 		}
@@ -405,11 +455,9 @@ func (f *Filesystem) WriteFiles(ctx context.Context, entries []WriteEntry, opts 
 // Endpoint: POST /files/compose (envd)
 // Envd: >= v0.5.5
 func (f *Filesystem) Compose(ctx context.Context, sources []string, destination string, opts FsOptions) (*EntryInfo, error) {
-	domain, _, gatingVer, _ := f.sbx.envdSnapshot()
-	if compareEnvdVersions(gatingVer, envdFileCompose) < 0 {
-		return nil, &TemplateError{Message: fmt.Sprintf(
-			"composing files requires envd >= %s, but this sandbox runs %s; rebuild the template to use it",
-			envdFileCompose, f.sbx.envdVersionRaw())}
+	domain, accessToken, gatingVer, envdCli := f.sbx.envdSnapshot()
+	if err := checkEnvdVersion(gatingVer, envdFileCompose, "composing files"); err != nil {
+		return nil, err
 	}
 	if len(sources) == 0 {
 		return nil, &InvalidArgumentError{Message: "sources must not be empty"}
@@ -419,7 +467,7 @@ func (f *Filesystem) Compose(ctx context.Context, sources []string, destination 
 	}
 
 	resolvedUser := resolveEnvdUser(gatingVer, opts.User)
-	callCtx, cancel := withEnvdCallOpts(ctx, f.sbx, opts.User, unaryEnvdTimeout(f.sbx, opts.effectiveTimeout()))
+	callCtx, cancel := withResolvedEnvdCallOpts(ctx, resolvedUser, unaryEnvdTimeout(f.sbx, opts.effectiveTimeout()))
 	defer cancel()
 
 	payload, err := json.Marshal(struct {
@@ -440,14 +488,17 @@ func (f *Filesystem) Compose(ctx context.Context, sources []string, destination 
 	if err != nil {
 		return nil, newSandboxError("build compose request", err)
 	}
-	f.applyHeaders(req, resolvedUser)
+	f.applyHeaders(req, accessToken, envdCli, resolvedUser)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := f.sbx.httpCli.Do(req)
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		drainBody(resp.Body)
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 300 {
 		return nil, mapEnvdFileErr(resp, destination)
 	}
@@ -496,26 +547,34 @@ func entryTypeFromString(s string) EntryType {
 	}
 }
 
-func (f *Filesystem) uploadOne(ctx context.Context, filePath string, r io.Reader, opts FsOptions) (*WriteInfo, error) {
-	gatingVer := f.sbx.envdVersionForGating()
+func (f *Filesystem) uploadOne(ctx context.Context, filePath string, r io.Reader, opts FsOptions, timeout time.Duration) (*WriteInfo, error) {
+	if r == nil {
+		r = http.NoBody
+	}
+	domain, accessToken, gatingVer, envdCli := f.sbx.envdSnapshot()
 	if len(opts.Metadata) > 0 {
 		if err := validateFileMetadata(opts.Metadata); err != nil {
 			return nil, err
 		}
-		if compareEnvdVersions(gatingVer, envdFileMetadata) < 0 {
-			return nil, &TemplateError{Message: fmt.Sprintf(
-				"file metadata requires envd >= %s, but this sandbox runs %s; rebuild the template to use it",
-				envdFileMetadata, f.sbx.envdVersionRaw())}
+		if err := checkEnvdVersion(gatingVer, envdFileMetadata, "file metadata"); err != nil {
+			return nil, err
 		}
 	}
 
-	u, err := f.sbx.buildFileURL(filePath, SignatureWrite, SignatureOptions{User: opts.User}, true)
+	resolvedUser := resolveEnvdUser(gatingVer, opts.User)
+	u, err := f.sbx.buildFileURLFromSnapshot(fileURLParams{
+		domain:       domain,
+		accessToken:  accessToken,
+		resolvedUser: resolvedUser,
+		filePath:     filePath,
+		op:           SignatureWrite,
+		upload:       true,
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	resolvedUser := resolveEnvdUser(gatingVer, opts.User)
-	callCtx, cancel := withEnvdCallOpts(ctx, f.sbx, opts.User, opts.effectiveTimeout())
+	callCtx, cancel := withResolvedEnvdCallOpts(ctx, resolvedUser, timeout)
 	defer cancel()
 
 	body := r
@@ -526,10 +585,26 @@ func (f *Filesystem) uploadOne(ctx context.Context, filePath string, r io.Reader
 		// path. Stream the body through an io.Pipe so memory stays bounded and a
 		// cancelled context is observed promptly.
 		pr, pw := io.Pipe()
-		defer func() { _ = pr.Close() }()
+		pipeDone := make(chan struct{})
 		mw := multipart.NewWriter(pw)
 		contentType = mw.FormDataContentType()
+		defer func() {
+			_ = pr.Close()
+			select {
+			case <-pipeDone:
+				return
+			default:
+			}
+			waitTimer := time.NewTimer(multipartPipeWaitTimeout)
+			defer waitTimer.Stop()
+			select {
+			case <-pipeDone:
+			case <-callCtx.Done():
+			case <-waitTimer.C:
+			}
+		}()
 		go func() {
+			defer close(pipeDone)
 			part, err := mw.CreateFormFile("file", filePath)
 			if err != nil {
 				_ = pw.CloseWithError(err)
@@ -548,7 +623,7 @@ func (f *Filesystem) uploadOne(ctx context.Context, filePath string, r io.Reader
 	if err != nil {
 		return nil, newSandboxError("build file request", err)
 	}
-	f.applyHeaders(req, resolvedUser)
+	f.applyHeaders(req, accessToken, envdCli, resolvedUser)
 	req.Header.Set("Content-Type", contentType)
 	for k, v := range opts.Metadata {
 		req.Header.Set(metadataHeaderPrefix+k, v)
@@ -558,7 +633,10 @@ func (f *Filesystem) uploadOne(ctx context.Context, filePath string, r io.Reader
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		drainBody(resp.Body)
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 300 {
 		return nil, mapEnvdFileErr(resp, filePath)
 	}
@@ -652,29 +730,55 @@ func (f *Filesystem) Watch(ctx context.Context, dirPath string, recursive bool) 
 // Endpoint: filesystem.Filesystem/WatchDir (envd Connect-RPC)
 // Envd: >= v0.1.0 (recursive >= v0.1.4; includeEntry >= v0.6.3; allowNetworkMounts >= v0.6.4)
 func (f *Filesystem) WatchWithOptions(ctx context.Context, dirPath string, opts WatchOptions) (*WatchHandle, error) {
-	ver := f.sbx.envdVersionForGating()
-	rawVer := f.sbx.envdVersionRaw()
-	if opts.Recursive && compareEnvdVersions(ver, envdRecursiveWatch) < 0 {
-		return nil, &TemplateError{Message: fmt.Sprintf(
-			"recursive directory watching requires envd >= %s, but this sandbox runs %s; rebuild the template to use it",
-			envdRecursiveWatch, rawVer)}
+	if opts.Recursive {
+		if err := f.sbx.requireEnvdVersion(envdRecursiveWatch, "recursive directory watching"); err != nil {
+			return nil, err
+		}
 	}
-	if opts.IncludeEntry && compareEnvdVersions(ver, envdWatchIncludeEntry) < 0 {
-		return nil, &TemplateError{Message: fmt.Sprintf(
-			"including entry info in watch events requires envd >= %s, but this sandbox runs %s; rebuild the template to use it",
-			envdWatchIncludeEntry, rawVer)}
+	if opts.IncludeEntry {
+		if err := f.sbx.requireEnvdVersion(envdWatchIncludeEntry, "including entry info in watch events"); err != nil {
+			return nil, err
+		}
 	}
-	if opts.AllowNetworkMounts && compareEnvdVersions(ver, envdWatchNetworkMounts) < 0 {
-		return nil, &TemplateError{Message: fmt.Sprintf(
-			"watching network mounts requires envd >= %s, but this sandbox runs %s; rebuild the template to use it",
-			envdWatchNetworkMounts, rawVer)}
+	if opts.AllowNetworkMounts {
+		if err := f.sbx.requireEnvdVersion(envdWatchNetworkMounts, "watching network mounts"); err != nil {
+			return nil, err
+		}
 	}
 
-	callCtx, optCancel := withEnvdCallOpts(ctx, f.sbx, opts.User, opts.RequestTimeout)
-	streamCtx, streamCancel := context.WithCancel(callCtx)
+	_, _, gatingVer, cli := f.sbx.envdSnapshot()
+	if cli == nil || cli.Filesystem == nil {
+		return nil, newSandboxError("envd client is not initialized", nil)
+	}
+	resolvedUser := resolveEnvdUser(gatingVer, opts.User)
+	baseCtx, optCancel := withResolvedEnvdCallOpts(ctx, resolvedUser, 0)
+	streamCtx, streamCancel := context.WithCancelCause(baseCtx)
 	cancelAll := func() {
-		streamCancel()
+		streamCancel(nil)
 		optCancel()
+	}
+
+	var (
+		startMu    sync.Mutex
+		started    bool
+		startTimer *time.Timer
+	)
+	if startTimeout := unaryEnvdTimeout(f.sbx, opts.RequestTimeout); startTimeout > 0 {
+		startTimer = time.AfterFunc(startTimeout, func() {
+			startMu.Lock()
+			if !started {
+				streamCancel(context.DeadlineExceeded)
+			}
+			startMu.Unlock()
+		})
+	}
+	clearStartTimeout := func() {
+		startMu.Lock()
+		started = true
+		if startTimer != nil {
+			startTimer.Stop()
+		}
+		startMu.Unlock()
 	}
 
 	req := connect.NewRequest(&fspb.WatchDirRequest{
@@ -687,19 +791,78 @@ func (f *Filesystem) WatchWithOptions(ctx context.Context, dirPath string, opts 
 		req.Header().Set("Connect-Timeout-Ms", strconv.Itoa(opts.TimeoutMs))
 	}
 
-	stream, err := f.sbx.envdClients().Filesystem.WatchDir(streamCtx, req)
+	stream, err := cli.Filesystem.WatchDir(streamCtx, req)
 	if err != nil {
+		clearStartTimeout()
+		mapped := mapWatchStartErr(streamCtx, err)
 		cancelAll()
-		return nil, mapConnectErr(err)
+		return nil, mapped
 	}
+
+	var initialEvent *FilesystemEvent
+	var handshakeOK bool
+	for stream.Receive() {
+		msg := stream.Msg()
+		if msg == nil {
+			continue
+		}
+		switch ev := msg.Event.(type) {
+		case *fspb.WatchDirResponse_Start:
+			handshakeOK = true
+		case *fspb.WatchDirResponse_Filesystem:
+			if ev.Filesystem != nil {
+				out := fsEventFromPBMessage(ev.Filesystem)
+				initialEvent = &out
+				handshakeOK = true
+			}
+		case *fspb.WatchDirResponse_Keepalive:
+			continue
+		}
+		if handshakeOK {
+			break
+		}
+	}
+	clearStartTimeout()
+	if !handshakeOK {
+		streamErr := stream.Err()
+		ctxErr := streamCtx.Err()
+		var mapped error
+		switch {
+		case streamErr != nil:
+			mapped = mapWatchStartErr(streamCtx, streamErr)
+		case ctxErr != nil:
+			mapped = mapWatchStartErr(streamCtx, ctxErr)
+		default:
+			mapped = newSandboxError("watch stream ended before start event", io.EOF)
+		}
+		_ = stream.Close()
+		cancelAll()
+		return nil, mapped
+	}
+	if ctxErr := streamCtx.Err(); ctxErr != nil {
+		mapped := mapWatchStartErr(streamCtx, ctxErr)
+		_ = stream.Close()
+		cancelAll()
+		return nil, mapped
+	}
+
 	h := &WatchHandle{
-		ctx:    streamCtx,
 		events: make(chan FilesystemEvent, 32),
 		done:   make(chan struct{}),
 		cancel: cancelAll,
 	}
-	go h.consume(stream)
+	if initialEvent != nil {
+		h.events <- *initialEvent
+	}
+	go h.consume(streamCtx, stream)
 	return h, nil
+}
+
+func mapWatchStartErr(streamCtx context.Context, err error) error {
+	if cause := context.Cause(streamCtx); errors.Is(cause, context.DeadlineExceeded) {
+		return contextErr(cause)
+	}
+	return mapConnectErr(err)
 }
 
 func entryInfoFromPB(e *fspb.EntryInfo) *EntryInfo {

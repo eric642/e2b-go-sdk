@@ -45,6 +45,7 @@ type envdTestHarness struct {
 	composeBody   map[string]any
 	holdStartCh   chan struct{}
 	disconnectHit atomic.Bool
+	disconnectCh  chan struct{}
 }
 
 func newEnvdTestHarness(t *testing.T, envdVer string) (*Sandbox, *envdTestHarness) {
@@ -52,6 +53,7 @@ func newEnvdTestHarness(t *testing.T, envdVer string) (*Sandbox, *envdTestHarnes
 	h := &envdTestHarness{
 		existingPIDs: map[uint32]bool{42: true},
 		existingTags: map[string]uint32{"boot-svc": 42},
+		disconnectCh: make(chan struct{}, 1),
 	}
 
 	procPath, procHandler := processconnect.NewProcessHandler(&harnessProcSvc{h: h})
@@ -267,6 +269,10 @@ func (s *harnessProcSvc) Start(ctx context.Context, req *connect.Request[procpb.
 		case <-holdCh:
 		case <-ctx.Done():
 			s.h.disconnectHit.Store(true)
+			select {
+			case s.h.disconnectCh <- struct{}{}:
+			default:
+			}
 			return ctx.Err()
 		}
 	}
@@ -813,9 +819,10 @@ func TestCommandsShellRetainOutputKillDisconnectCloseStdinAndStreamInput(t *test
 	if err != nil {
 		t.Fatalf("Start background: %v", err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for bgHandle.PID() == 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	waitPIDCtx, waitPIDCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer waitPIDCancel()
+	if _, err := bgHandle.WaitPID(waitPIDCtx); err != nil {
+		t.Fatalf("WaitPID: %v", err)
 	}
 	if err := bgHandle.CloseStdin(ctx); err != nil {
 		t.Fatalf("CommandHandle.CloseStdin: %v", err)
@@ -823,8 +830,10 @@ func TestCommandsShellRetainOutputKillDisconnectCloseStdinAndStreamInput(t *test
 	bgHandle.Disconnect()
 	bgHandle.Disconnect()
 
-	for !h.disconnectHit.Load() && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-h.disconnectCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Disconnect to cancel server stream")
 	}
 	close(holdCh)
 	h.mu.Lock()
@@ -931,7 +940,7 @@ func TestStreamInputSendDataFailureFollowedByClose(t *testing.T) {
 
 	closeErr1 := stream.Close()
 	closeErr2 := stream.Close()
-	if closeErr1 != sendErr || closeErr2 != sendErr {
+	if !errors.Is(closeErr1, sendErr) || !errors.Is(closeErr2, sendErr) {
 		t.Fatalf("Close() errors (%v, %v) did not match cached sendErr (%v)", closeErr1, closeErr2, sendErr)
 	}
 	if afterErr := stream.SendData([]byte("after")); afterErr == nil {
@@ -965,9 +974,10 @@ func TestCommandsRunForegroundTimeoutDisconnectsStream(t *testing.T) {
 	}
 
 	_ = pw.Close()
-	deadline := time.Now().Add(2 * time.Second)
-	for !h.disconnectHit.Load() && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-h.disconnectCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("foreground Commands.Run timeout leaked server stream instead of calling Disconnect()")
 	}
 	if !h.disconnectHit.Load() {
 		t.Fatal("foreground Commands.Run timeout leaked server stream instead of calling Disconnect()")

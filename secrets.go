@@ -64,11 +64,11 @@ func (p *SecretPaginator) NextItems(ctx context.Context) ([]SecretInfo, error) {
 
 	params := &apiclient.GetSecretsParams{}
 	if p.opts.Limit > 0 {
-		lim := apiclient.PaginationLimit(p.opts.Limit)
+		lim := p.opts.Limit
 		params.Limit = &lim
 	}
 	if p.next != "" {
-		tok := apiclient.PaginationNextToken(p.next)
+		tok := p.next
 		params.NextToken = &tok
 	}
 
@@ -76,7 +76,7 @@ func (p *SecretPaginator) NextItems(ctx context.Context) ([]SecretInfo, error) {
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, ""); err != nil {
 		return nil, err
 	}
@@ -124,7 +124,7 @@ func (c *Client) CreateSecret(ctx context.Context, name, value string, opts ...S
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, ""); err != nil {
 		return nil, err
 	}
@@ -156,7 +156,7 @@ func (c *Client) UpdateSecret(ctx context.Context, secretIDOrName, value string,
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, ""); err != nil {
 		return nil, err
 	}
@@ -182,7 +182,7 @@ func (c *Client) GetSecret(ctx context.Context, secretIDOrName string) (*SecretI
 	if err != nil {
 		return nil, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := mapHTTPErr(resp, ""); err != nil {
 		return nil, err
 	}
@@ -257,12 +257,12 @@ func (c *Client) DeleteSecret(ctx context.Context, secretIDOrName string) (bool,
 	if err != nil {
 		return false, mapHTTPOrCtx(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		drainResponseBody(resp.Body)
 		return false, nil
 	}
-	if err := mapHTTPErr(resp, ""); err != nil {
+	if err := finishNoContent(resp, ""); err != nil {
 		return false, err
 	}
 	return true, nil

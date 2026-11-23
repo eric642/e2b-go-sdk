@@ -240,9 +240,9 @@ func TestListMapsHTTPErrors(t *testing.T) {
 		status int
 		check  func(error) bool
 	}{
-		{http.StatusUnauthorized, func(e error) bool { var t *AuthenticationError; return errors.As(e, &t) }},
-		{http.StatusTooManyRequests, func(e error) bool { var t *RateLimitError; return errors.As(e, &t) }},
-		{http.StatusInternalServerError, func(e error) bool { var t *SandboxError; return errors.As(e, &t) }},
+		{http.StatusUnauthorized, func(e error) bool { _, ok := errors.AsType[*AuthenticationError](e); return ok }},
+		{http.StatusTooManyRequests, func(e error) bool { _, ok := errors.AsType[*RateLimitError](e); return ok }},
+		{http.StatusInternalServerError, func(e error) bool { _, ok := errors.AsType[*SandboxError](e); return ok }},
 	}
 	for _, tc := range cases {
 		status := tc.status
@@ -320,5 +320,111 @@ func TestSandboxInfoFromListed(t *testing.T) {
 	}
 	if info.Domain != "" || info.EnvdAccessToken != "" || info.Network != nil || info.Lifecycle != nil {
 		t.Fatalf("absent fields should be zero: %+v", info)
+	}
+}
+
+func TestListClonesOptionsSnapshot(t *testing.T) {
+	origTime := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	var gotMetadata, gotStartedAfter string
+	var gotStates []string
+	mock := newRESTMock(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		gotMetadata = q.Get("metadata")
+		gotStates = q["state"]
+		gotStartedAfter = q.Get("startedAfter")
+		writeJSON(t, w, http.StatusOK, []map[string]any{})
+	}))
+
+	c, err := NewClient(mock.Config)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	md := map[string]string{"env": "prod"}
+	states := []SandboxState{SandboxStateRunning}
+	ts := origTime
+	p := c.List(context.Background(), SandboxListOptions{
+		Metadata:     md,
+		State:        states,
+		StartedAfter: &ts,
+	})
+
+	// Mutate caller inputs after creating paginator.
+	md["env"] = "mutated"
+	md["injected"] = "yes"
+	states[0] = SandboxStatePaused
+	ts = origTime.Add(24 * time.Hour)
+
+	if _, err := p.NextItems(context.Background()); err != nil {
+		t.Fatalf("NextItems: %v", err)
+	}
+	if gotMetadata != "env=prod" {
+		t.Fatalf("metadata = %q, want env=prod", gotMetadata)
+	}
+	if strings.Join(gotStates, ",") != "running" {
+		t.Fatalf("state = %v, want [running]", gotStates)
+	}
+	if gotStartedAfter != origTime.Format(time.RFC3339) {
+		t.Fatalf("startedAfter = %q, want %q", gotStartedAfter, origTime.Format(time.RFC3339))
+	}
+}
+
+func TestGetMetricsSendsStartEndParams(t *testing.T) {
+	start := time.Unix(1000, 0)
+	end := time.Unix(2000, 0)
+	sbx := newFakeSandboxWithServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("start") != "1000" {
+			t.Errorf("start=%q want 1000", q.Get("start"))
+		}
+		if q.Get("end") != "2000" {
+			t.Errorf("end=%q want 2000", q.Get("end"))
+		}
+		writeJSON(t, w, http.StatusOK, []map[string]any{})
+	}))
+	if _, err := sbx.GetMetrics(context.Background(), MetricsOptions{Start: start, End: end}); err != nil {
+		t.Fatalf("GetMetrics: %v", err)
+	}
+}
+
+func TestGetMetricsOmitsParamsWhenNoOpts(t *testing.T) {
+	sbx := newFakeSandboxWithServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("start") != "" || q.Get("end") != "" {
+			t.Errorf("unexpected start/end: %v", q)
+		}
+		writeJSON(t, w, http.StatusOK, []map[string]any{})
+	}))
+	if _, err := sbx.GetMetrics(context.Background()); err != nil {
+		t.Fatalf("GetMetrics: %v", err)
+	}
+}
+
+func TestGetMcpURL(t *testing.T) {
+	sbx := &Sandbox{ID: "sbx-1", Domain: "example.com", cfg: Config{Domain: "example.com"}}
+	got := sbx.GetMcpURL()
+	want := "https://50005-sbx-1.example.com/mcp"
+	if got != want {
+		t.Fatalf("GetMcpURL=%q want %q", got, want)
+	}
+}
+
+func TestGetMcpTokenReadsAsRootAndTrims(t *testing.T) {
+	sbx := newEnvdHTTPSandbox(t, "0.5.7", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/files" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.URL.Query().Get("username"); got != "root" {
+			t.Errorf("username=%q want root", got)
+		}
+		_, _ = w.Write([]byte("  secret-token\n"))
+	}))
+	sbx.Files = &Filesystem{sbx: sbx}
+	tok, err := sbx.GetMcpToken(context.Background())
+	if err != nil {
+		t.Fatalf("GetMcpToken: %v", err)
+	}
+	if tok != "secret-token" {
+		t.Fatalf("token=%q want trimmed secret-token", tok)
 	}
 }

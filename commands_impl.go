@@ -132,26 +132,23 @@ func (c *Commands) Start(ctx context.Context, cmd string, opts RunOptions) (*Com
 		req.Header().Set("Connect-Timeout-Ms", strconv.Itoa(opts.TimeoutMs))
 	}
 
-	callCtx, optCancel := withEnvdCallOpts(ctx, c.sbx, opts.User, opts.RequestTimeout)
-	streamCtx, streamCancel := context.WithCancel(callCtx)
-	cancelAll := func() {
-		streamCancel()
-		optCancel()
-	}
+	streamCtx, clearStartTimeout, cancelAll := startStreamContext(ctx, c.sbx, opts.User, opts.RequestTimeout)
 
 	stream, err := c.sbx.envdClients().Process.Start(streamCtx, req)
 	if err != nil {
+		mapped := mapStreamErr(streamCtx, err)
 		cancelAll()
-		return nil, mapConnectErr(err)
+		return nil, mapped
 	}
 
 	retain := opts.RetainOutput == nil || *opts.RetainOutput
 	handle := newCommandHandle(c.sbx, opts.OnStdout, opts.OnStderr, nil, retain)
 	handle.user = opts.User
+	handle.clearStartTimeout = clearStartTimeout
 	handle.cancel = cancelAll
-	handle.startStream(&startStream{s: stream})
+	handle.startStream(streamCtx, &startStream{s: stream})
 	if opts.Stdin != nil {
-		go pumpStdin(ctx, streamCtx, handle, opts.Stdin)
+		go pumpStdin(streamCtx, handle, opts.Stdin)
 	}
 	return handle, nil
 }
@@ -203,17 +200,13 @@ func connectProcessSelector(
 		req.Header().Set("Connect-Timeout-Ms", strconv.Itoa(timeoutMs))
 	}
 
-	callCtx, optCancel := withEnvdCallOpts(ctx, sbx, user, reqTimeout)
-	streamCtx, streamCancel := context.WithCancel(callCtx)
-	cancelAll := func() {
-		streamCancel()
-		optCancel()
-	}
+	streamCtx, clearStartTimeout, cancelAll := startStreamContext(ctx, sbx, user, reqTimeout)
 
 	stream, err := sbx.envdClients().Process.Connect(streamCtx, req)
 	if err != nil {
+		mapped := mapStreamErr(streamCtx, err)
 		cancelAll()
-		return nil, mapConnectErr(err)
+		return nil, mapped
 	}
 
 	handle := newCommandHandle(sbx, onStdout, onStderr, onPty, retainOutput)
@@ -222,8 +215,9 @@ func connectProcessSelector(
 		handle.markStarted()
 	}
 	handle.user = user
+	handle.clearStartTimeout = clearStartTimeout
 	handle.cancel = cancelAll
-	handle.startStream(&connectStream{s: stream})
+	handle.startStream(streamCtx, &connectStream{s: stream})
 	return handle, nil
 }
 
@@ -323,8 +317,7 @@ func sendProcessSignal(ctx context.Context, sbx *Sandbox, selector *procpb.Proce
 		Signal:  sig,
 	})
 	if _, err := sbx.envdClients().Process.SendSignal(callCtx, req); err != nil {
-		var ce *connect.Error
-		if errors.As(err, &ce) && ce.Code() == connect.CodeNotFound {
+		if ce, ok := errors.AsType[*connect.Error](err); ok && ce.Code() == connect.CodeNotFound {
 			return false, nil
 		}
 		return false, mapConnectErr(err)
@@ -372,12 +365,13 @@ func (c *Commands) StreamInput(ctx context.Context, pid uint32, opts ...CommandR
 // Endpoint: process.Process/CloseStdin (envd Connect-RPC)
 // Envd: >= v0.5.2
 func (c *Commands) CloseStdin(ctx context.Context, pid uint32, opts ...CommandRequestOptions) error {
-	if compareEnvdVersions(c.sbx.envdVersionForGating(), envdEnvdClose) < 0 {
-		return &TemplateError{Message: fmt.Sprintf(
-			"closing stdin requires envd >= %s, but this sandbox runs %s; rebuild the template to use it",
-			envdEnvdClose, c.sbx.envdVersionRaw())}
+	if err := c.sbx.requireEnvdVersion(envdEnvdClose, "closing stdin"); err != nil {
+		return err
 	}
-	o := firstCommandReqOpts(opts)
+	return c.closeStdinChecked(ctx, pid, firstCommandReqOpts(opts))
+}
+
+func (c *Commands) closeStdinChecked(ctx context.Context, pid uint32, o CommandRequestOptions) error {
 	callCtx, cancel := withEnvdCallOpts(ctx, c.sbx, o.User, unaryEnvdTimeout(c.sbx, o.RequestTimeout))
 	defer cancel()
 
@@ -399,9 +393,8 @@ type CommandInputStream struct {
 // Endpoint: process.Process/StreamInput (envd Connect-RPC)
 // Envd: >= v0.1.0
 func (cs *CommandInputStream) SendData(data []byte) error {
-	payload := append([]byte(nil), data...)
 	return cs.s.send(&procpb.ProcessInput{
-		Input: &procpb.ProcessInput_Stdin{Stdin: payload},
+		Input: &procpb.ProcessInput_Stdin{Stdin: data},
 	})
 }
 
@@ -422,24 +415,89 @@ func (cs *CommandInputStream) Close() error {
 	return cs.s.close()
 }
 
+// startStreamContext builds a cancellable stream context carrying envd user
+// metadata without attaching reqTimeout to the full stream lifetime. Instead,
+// a handshake timer cancels streamCtx with a *TimeoutError if
+// clearStartTimeout is not called before the resolved request timeout elapses.
+func startStreamContext(ctx context.Context, sbx *Sandbox, user string, reqTimeout time.Duration) (
+	streamCtx context.Context,
+	clearStartTimeout func(),
+	cancelAll func(),
+) {
+	callCtx, optCancel := withEnvdCallOpts(ctx, sbx, user, 0)
+	streamCtx, cancelCause := context.WithCancelCause(callCtx)
+
+	timeout := unaryEnvdTimeout(sbx, reqTimeout)
+	var (
+		timerMu sync.Mutex
+		timer   *time.Timer
+	)
+	if timeout > 0 && callCtx.Err() == nil {
+		timer = time.AfterFunc(timeout, func() {
+			cancelCause(&TimeoutError{
+				Message: fmt.Sprintf("request handshake timed out after %s", timeout),
+				Cause:   context.DeadlineExceeded,
+			})
+		})
+	}
+
+	clearStartTimeout = func() {
+		timerMu.Lock()
+		t := timer
+		timer = nil
+		timerMu.Unlock()
+		if t != nil {
+			t.Stop()
+		}
+	}
+
+	cancelAll = func() {
+		clearStartTimeout()
+		cancelCause(nil)
+		optCancel()
+	}
+
+	return streamCtx, clearStartTimeout, cancelAll
+}
+
+func mapStreamErr(streamCtx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if streamCtx != nil {
+		if te, ok := errors.AsType[*TimeoutError](context.Cause(streamCtx)); ok {
+			return te
+		}
+	}
+	return mapConnectErr(err)
+}
+
+type inputStreamClient interface {
+	Send(*procpb.StreamInputRequest) error
+	CloseAndReceive() (*connect.Response[procpb.StreamInputResponse], error)
+}
+
+type inputSendReq struct {
+	in   *procpb.ProcessInput
+	resp chan error
+}
+
 type inputStream struct {
-	mu            sync.Mutex
-	stream        *connect.ClientStreamForClient[procpb.StreamInputRequest, procpb.StreamInputResponse]
-	cancel        context.CancelFunc
-	stopKeepalive chan struct{}
-	keepaliveDone chan struct{}
-	finished      chan struct{}
-	closed        bool
-	closeErr      error
+	mu                sync.Mutex
+	stream            inputStreamClient
+	cancel            context.CancelFunc
+	keepaliveInterval time.Duration
+	sendCh            chan inputSendReq
+	closeCh           chan struct{}
+	keepaliveDone     chan struct{}
+	finished          chan struct{}
+	closed            bool
+	inSend            bool
+	closeErr          error
 }
 
 func newInputStream(ctx context.Context, sbx *Sandbox, pid uint32, opts CommandRequestOptions) (*inputStream, error) {
-	callCtx, optCancel := withEnvdCallOpts(ctx, sbx, opts.User, opts.RequestTimeout)
-	streamCtx, streamCancel := context.WithCancel(callCtx)
-	cancelAll := func() {
-		streamCancel()
-		optCancel()
-	}
+	streamCtx, clearStartTimeout, cancelAll := startStreamContext(ctx, sbx, opts.User, opts.RequestTimeout)
 
 	stream := sbx.envdClients().Process.StreamInput(streamCtx)
 	startReq := &procpb.StreamInputRequest{
@@ -450,6 +508,11 @@ func newInputStream(ctx context.Context, sbx *Sandbox, pid uint32, opts CommandR
 		},
 	}
 	if err := stream.Send(startReq); err != nil {
+		if te, ok := errors.AsType[*TimeoutError](context.Cause(streamCtx)); ok {
+			cancelAll()
+			_, _ = stream.CloseAndReceive()
+			return nil, te
+		}
 		_, recvErr := stream.CloseAndReceive()
 		cancelAll()
 		if recvErr != nil {
@@ -457,58 +520,159 @@ func newInputStream(ctx context.Context, sbx *Sandbox, pid uint32, opts CommandR
 		}
 		return nil, mapConnectErr(err)
 	}
+	clearStartTimeout()
 
-	is := &inputStream{
-		stream:        stream,
-		cancel:        cancelAll,
-		stopKeepalive: make(chan struct{}),
-		keepaliveDone: make(chan struct{}),
-		finished:      make(chan struct{}),
-	}
-	go is.keepaliveLoop(streamCtx)
-	return is, nil
+	return startInputStream(streamCtx, cancelAll, stream, time.Duration(KeepAlivePingIntervalSec)*time.Second), nil
 }
 
-func (is *inputStream) keepaliveLoop(ctx context.Context) {
-	defer close(is.keepaliveDone)
-	ticker := time.NewTicker(time.Duration(KeepAlivePingIntervalSec) * time.Second)
+func startInputStream(streamCtx context.Context, cancel context.CancelFunc, stream inputStreamClient, keepaliveInterval time.Duration) *inputStream {
+	if keepaliveInterval <= 0 {
+		keepaliveInterval = time.Duration(KeepAlivePingIntervalSec) * time.Second
+	}
+	is := &inputStream{
+		stream:            stream,
+		cancel:            cancel,
+		keepaliveInterval: keepaliveInterval,
+		sendCh:            make(chan inputSendReq),
+		closeCh:           make(chan struct{}),
+		keepaliveDone:     make(chan struct{}),
+		finished:          make(chan struct{}),
+	}
+	go is.writerLoop(streamCtx)
+	return is
+}
+
+func (is *inputStream) markClosedLocked() {
+	if !is.closed {
+		is.closed = true
+		close(is.closeCh)
+	}
+}
+
+func (is *inputStream) sendFrame(req *procpb.StreamInputRequest) (sent bool, err error) {
+	is.mu.Lock()
+	if is.closed {
+		is.mu.Unlock()
+		return false, nil
+	}
+	is.inSend = true
+	is.mu.Unlock()
+
+	err = is.stream.Send(req)
+
+	is.mu.Lock()
+	is.inSend = false
+	is.mu.Unlock()
+	return true, err
+}
+
+func (is *inputStream) writerLoop(streamCtx context.Context) {
+	var (
+		pendingResp chan error
+		pendingErr  error
+	)
+	defer func() {
+		close(is.keepaliveDone)
+		if pendingResp != nil {
+			pendingResp <- pendingErr
+		}
+	}()
+
+	ticker := time.NewTicker(is.keepaliveInterval)
 	defer ticker.Stop()
+
 	for {
 		select {
-		case <-is.stopKeepalive:
+		case <-is.closeCh:
+			is.finish(streamCtx, nil)
 			return
-		case <-ctx.Done():
+		case <-streamCtx.Done():
+			is.finish(streamCtx, streamCtx.Err())
 			return
-		case <-ticker.C:
-			is.mu.Lock()
-			if !is.closed {
-				_ = is.stream.Send(&procpb.StreamInputRequest{
-					Event: &procpb.StreamInputRequest_Keepalive{
-						Keepalive: &procpb.StreamInputRequest_KeepAlive{},
-					},
-				})
+		case req := <-is.sendCh:
+			sent, err := is.sendFrame(&procpb.StreamInputRequest{
+				Event: &procpb.StreamInputRequest_Data{
+					Data: &procpb.StreamInputRequest_DataEvent{Input: req.in},
+				},
+			})
+			if !sent {
+				is.finish(streamCtx, nil)
+				mapped := is.closeErr
+				if mapped == nil {
+					mapped = newSandboxError("cannot send input after stream is closed", nil)
+				}
+				pendingResp = req.resp
+				pendingErr = mapped
+				return
 			}
-			is.mu.Unlock()
+			if err != nil {
+				is.finish(streamCtx, err)
+				pendingResp = req.resp
+				pendingErr = is.closeErr
+				return
+			}
+			ticker.Reset(is.keepaliveInterval)
+			req.resp <- nil
+		case <-ticker.C:
+			sent, err := is.sendFrame(&procpb.StreamInputRequest{
+				Event: &procpb.StreamInputRequest_Keepalive{
+					Keepalive: &procpb.StreamInputRequest_KeepAlive{},
+				},
+			})
+			if !sent {
+				is.finish(streamCtx, nil)
+				return
+			}
+			if err != nil {
+				is.finish(streamCtx, err)
+				return
+			}
 		}
 	}
 }
 
+func (is *inputStream) finish(streamCtx context.Context, sendErr error) {
+	is.mu.Lock()
+	is.markClosedLocked()
+	is.mu.Unlock()
+
+	_, err := is.stream.CloseAndReceive()
+	if err == nil {
+		err = sendErr
+	}
+	is.closeErr = mapStreamErr(streamCtx, err)
+	is.cancel()
+	close(is.finished)
+}
+
 func (is *inputStream) send(in *procpb.ProcessInput) error {
+	closedErr := func() error {
+		<-is.finished
+		if is.closeErr != nil {
+			return is.closeErr
+		}
+		return newSandboxError("cannot send input after stream is closed", nil)
+	}
+
 	is.mu.Lock()
 	if is.closed {
 		is.mu.Unlock()
-		return newSandboxError("cannot send input after stream is closed", nil)
+		return closedErr()
 	}
-	err := is.stream.Send(&procpb.StreamInputRequest{
-		Event: &procpb.StreamInputRequest_Data{
-			Data: &procpb.StreamInputRequest_DataEvent{Input: in},
-		},
-	})
-	if err == nil {
-		is.mu.Unlock()
-		return nil
+	is.mu.Unlock()
+
+	req := inputSendReq{
+		in:   in,
+		resp: make(chan error, 1),
 	}
-	return is.finishLocked(err)
+	select {
+	case is.sendCh <- req:
+		return <-req.resp
+	case <-is.closeCh:
+		return closedErr()
+	case <-is.finished:
+		return closedErr()
+	}
 }
 
 func (is *inputStream) close() error {
@@ -518,38 +682,25 @@ func (is *inputStream) close() error {
 		<-is.finished
 		return is.closeErr
 	}
-	return is.finishLocked(nil)
-}
-
-func (is *inputStream) finishLocked(sendErr error) error {
-	is.closed = true
-	close(is.stopKeepalive)
+	is.markClosedLocked()
+	abort := is.inSend
 	is.mu.Unlock()
 
-	<-is.keepaliveDone
-
-	is.mu.Lock()
-	_, err := is.stream.CloseAndReceive()
-	if err == nil {
-		err = sendErr
+	if abort {
+		is.cancel()
 	}
-	mapped := mapConnectErr(err)
-	is.closeErr = mapped
-	is.mu.Unlock()
-
-	is.cancel()
-	close(is.finished)
-	return mapped
+	<-is.finished
+	return is.closeErr
 }
 
-func pumpStdin(ctx, streamCtx context.Context, h *CommandHandle, r io.Reader) {
+const pumpStdinCloseTimeout = 5 * time.Second
+
+func pumpStdin(streamCtx context.Context, h *CommandHandle, r io.Reader) {
 	select {
 	case <-h.started:
 	case <-h.done:
 		return
 	case <-streamCtx.Done():
-		return
-	case <-ctx.Done():
 		return
 	}
 	if h.PID() == 0 {
@@ -557,22 +708,27 @@ func pumpStdin(ctx, streamCtx context.Context, h *CommandHandle, r io.Reader) {
 	}
 	buf := make([]byte, 32<<10)
 	for {
-		if streamCtx.Err() != nil || ctx.Err() != nil {
+		if streamCtx.Err() != nil {
 			return
 		}
 		n, err := r.Read(buf)
-		if streamCtx.Err() != nil || ctx.Err() != nil {
+		if streamCtx.Err() != nil {
 			return
 		}
 		if n > 0 {
-			if sendErr := h.SendStdin(ctx, buf[:n]); sendErr != nil {
+			if sendErr := h.SendStdin(streamCtx, buf[:n]); sendErr != nil {
+				if streamCtx.Err() == nil && h.sbx.requireEnvdVersion(envdEnvdClose, "closing stdin") == nil {
+					closeCtx, cancel := context.WithTimeout(streamCtx, pumpStdinCloseTimeout)
+					_ = h.CloseStdin(closeCtx, CommandRequestOptions{RequestTimeout: pumpStdinCloseTimeout})
+					cancel()
+				}
 				return
 			}
 		}
 		if err != nil {
-			if streamCtx.Err() == nil && ctx.Err() == nil &&
-				errors.Is(err, io.EOF) && compareEnvdVersions(h.sbx.envdVersionForGating(), envdEnvdClose) >= 0 {
-				_ = h.CloseStdin(ctx)
+			if streamCtx.Err() == nil && errors.Is(err, io.EOF) &&
+				h.sbx.requireEnvdVersion(envdEnvdClose, "closing stdin") == nil {
+				_ = h.CloseStdin(streamCtx)
 			}
 			return
 		}
