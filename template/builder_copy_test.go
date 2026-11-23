@@ -55,11 +55,22 @@ func TestCopy_RejectsAbsolutePath(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for absolute src")
 	}
-	var invalid *e2b.InvalidArgumentError
-	if !errors.As(err, &invalid) {
+	if _, ok := errors.AsType[*e2b.InvalidArgumentError](err); !ok {
 		t.Fatalf("expected InvalidArgumentError, got %T: %v", err, err)
 	}
 	// No instructions should have been appended.
+	if len(b.instructions) != 0 {
+		t.Fatalf("expected no instructions, got %d", len(b.instructions))
+	}
+}
+
+func TestCopy_RejectsEmptySrc(t *testing.T) {
+	ctx := t.TempDir()
+	b := New().FromImage("alpine:3").WithContext(ctx).Copy("", "/dst")
+	_, err := b.serialize(false)
+	if _, ok := errors.AsType[*e2b.InvalidArgumentError](err); !ok {
+		t.Fatalf("expected InvalidArgumentError for empty src, got %T: %v", err, err)
+	}
 	if len(b.instructions) != 0 {
 		t.Fatalf("expected no instructions, got %d", len(b.instructions))
 	}

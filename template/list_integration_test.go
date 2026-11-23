@@ -3,6 +3,7 @@
 package template
 
 import (
+	"slices"
 	"testing"
 )
 
@@ -24,13 +25,9 @@ func TestIntegrationListAfterBuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	var found bool
-	for _, tm := range templates {
-		if tm.TemplateID == info.TemplateID {
-			found = true
-			break
-		}
-	}
+	found := slices.ContainsFunc(templates, func(tm Template) bool {
+		return tm.TemplateID == info.TemplateID
+	})
 	if !found {
 		t.Fatalf("built template %s not present in List result (got %d templates)",
 			info.TemplateID, len(templates))

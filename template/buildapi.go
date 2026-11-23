@@ -5,16 +5,50 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
+	e2b "github.com/eric642/e2b-go-sdk"
 	apiclient "github.com/eric642/e2b-go-sdk/internal/api"
 )
 
 const defaultFileUploadTimeout = time.Hour
+
+func validatePathParam(name, val string) error {
+	if val == "" || val == "." || val == ".." {
+		return &e2b.InvalidArgumentError{
+			Message: fmt.Sprintf("invalid %s %q: must not be empty, '.', or '..'", name, val),
+		}
+	}
+	return nil
+}
+
+// decodeJSONFallback returns *typed when non-nil; otherwise decodes raw into T.
+// When raw is empty and allowEmpty is false, it returns an "empty response body"
+// error. Real json.Unmarshal errors are preserved rather than masked.
+func decodeJSONFallback[T any](typed *T, raw []byte, allowEmpty bool) (T, error) {
+	var zero T
+	if typed != nil {
+		return *typed, nil
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		if allowEmpty {
+			return zero, nil
+		}
+		return zero, errors.New("empty response body")
+	}
+	var out T
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return zero, err
+	}
+	return out, nil
+}
 
 func idempotencyEditor(key string) []apiclient.RequestEditorFn {
 	if key == "" {
@@ -36,19 +70,19 @@ func (c *Client) requestBuildWithOptions(ctx context.Context, opts BuildOptions)
 		body.Tags = &t
 	}
 	if opts.CPUCount > 0 {
-		cc := apiclient.CPUCount(opts.CPUCount)
+		cc := opts.CPUCount
 		body.CpuCount = &cc
 	}
 	if opts.MaxCPUCount != nil {
-		mcc := apiclient.CPUCount(*opts.MaxCPUCount)
+		mcc := *opts.MaxCPUCount
 		body.MaxCpuCount = &mcc
 	}
 	if opts.MemoryMB > 0 {
-		mm := apiclient.MemoryMB(opts.MemoryMB)
+		mm := opts.MemoryMB
 		body.MemoryMB = &mm
 	}
 	if opts.MinFreeDiskMB != nil {
-		disk := apiclient.MinFreeDiskMb(*opts.MinFreeDiskMB)
+		disk := *opts.MinFreeDiskMB
 		body.MinFreeDiskMb = &disk
 	}
 
@@ -56,7 +90,7 @@ func (c *Client) requestBuildWithOptions(ctx context.Context, opts BuildOptions)
 	if err != nil {
 		return nil, mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, decodeBuildAPIError(resp, "request", "", "")
 	}
@@ -66,16 +100,14 @@ func (c *Client) requestBuildWithOptions(ctx context.Context, opts BuildOptions)
 	}
 	// The generated parser only populates JSON202 for the documented 202
 	// response. Accept any 2xx by decoding the raw body as a fallback.
-	if parsed.JSON202 != nil {
-		return parsed.JSON202, nil
+	out, err := decodeJSONFallback(parsed.JSON202, parsed.Body, false)
+	if err != nil {
+		return nil, &BuildError{Op: "request", Err: err}
 	}
-	if len(parsed.Body) > 0 {
-		var out apiclient.TemplateRequestResponseV3
-		if err := json.Unmarshal(parsed.Body, &out); err == nil && out.TemplateID != "" {
-			return &out, nil
-		}
+	if out.TemplateID == "" {
+		return nil, &BuildError{Op: "request", Err: errors.New("empty templateID in response")}
 	}
-	return nil, &BuildError{Op: "request", Err: errors.New("empty response body")}
+	return &out, nil
 }
 
 // templateBuildRequestV2 is the POST /v2/templates request body. Upstream
@@ -103,27 +135,30 @@ func (c *Client) requestBuildV2(ctx context.Context, alias string, cpu, mem int3
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return nil, err
+		return nil, &BuildError{Op: "request", Err: err}
 	}
 	endpoint, err := url.JoinPath(c.apiCli.Server, "v2", "templates")
 	if err != nil {
-		return nil, err
+		return nil, &BuildError{Op: "request", Err: err}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return nil, err
+		return nil, &BuildError{Op: "request", Err: err}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	for _, edit := range c.apiCli.RequestEditors {
 		if err := edit(ctx, req); err != nil {
-			return nil, err
+			if _, ok := errors.AsType[e2b.Error](err); ok {
+				return nil, err
+			}
+			return nil, &BuildError{Op: "request", Err: err}
 		}
 	}
 	resp, err := c.apiCli.Client.Do(req)
 	if err != nil {
 		return nil, mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, decodeBuildAPIError(resp, "request", "", "")
 	}
@@ -131,23 +166,30 @@ func (c *Client) requestBuildV2(ctx context.Context, alias string, cpu, mem int3
 	if err != nil {
 		return nil, &BuildError{Op: "request", Err: err}
 	}
-	if len(raw) > 0 {
-		var out templateLegacyResponse
-		if err := json.Unmarshal(raw, &out); err == nil && out.TemplateID != "" {
-			return &out, nil
-		}
+	out, err := decodeJSONFallback[templateLegacyResponse](nil, raw, false)
+	if err != nil {
+		return nil, &BuildError{Op: "request", Err: err}
 	}
-	return nil, &BuildError{Op: "request", Err: errors.New("empty response body")}
+	if out.TemplateID == "" {
+		return nil, &BuildError{Op: "request", Err: errors.New("empty templateID in response")}
+	}
+	return &out, nil
 }
 
 func (c *Client) getFileUploadLink(ctx context.Context, templateID, hash string) (*apiclient.TemplateBuildFileUpload, error) {
+	if err := validatePathParam("templateID", templateID); err != nil {
+		return nil, err
+	}
+	if err := validatePathParam("hash", hash); err != nil {
+		return nil, err
+	}
 	resp, err := c.doWithTokenFallback(fallbackOpUploadLink, func(cli *apiclient.Client) (*http.Response, error) {
-		return cli.GetTemplatesTemplateIDFilesHash(ctx, apiclient.TemplateID(templateID), hash)
+		return cli.GetTemplatesTemplateIDFilesHash(ctx, templateID, hash)
 	})
 	if err != nil {
 		return nil, mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, decodeUploadAPIError(resp, "", hash)
 	}
@@ -157,54 +199,105 @@ func (c *Client) getFileUploadLink(ctx context.Context, templateID, hash string)
 	}
 	// Generated parser populates JSON201; fall back to a raw decode if the
 	// server returns a different 2xx (e.g. 200).
-	if parsed.JSON201 != nil {
-		return parsed.JSON201, nil
+	out, err := decodeJSONFallback(parsed.JSON201, parsed.Body, false)
+	if err != nil {
+		return nil, &UploadError{Hash: hash, Err: err}
 	}
-	if len(parsed.Body) > 0 {
-		var out apiclient.TemplateBuildFileUpload
-		if err := json.Unmarshal(parsed.Body, &out); err == nil {
-			return &out, nil
-		}
-	}
-	return nil, &UploadError{Hash: hash, Err: errors.New("empty response body")}
+	return &out, nil
 }
 
 // uploadFile PUTs a tar.gz body to a pre-signed URL using the dedicated
 // data-plane HTTP client (no control-plane retries or 60s timeout).
 //
-// The body is buffered into a *bytes.Reader if not already one so
-// http.NewRequestWithContext sets an exact Content-Length (required by AWS S3
-// presigned PUT URLs, which reject chunked Transfer-Encoding with 501
-// NotImplemented) and GetBody. Any headers returned by the control plane on
-// TemplateBuildFileUpload.Headers (e.g. Azure Blob SAS x-ms-blob-type:
-// BlockBlob) are applied to the PUT request, and Content-Type defaults to
-// application/gzip when not supplied by headers. A 1-hour context timeout
-// bounds the upload when ctx carries no shorter deadline.
+// When body is an *os.File (such as the spooled archive from tarFileToTemp),
+// uploadFile streams directly from disk via io.SectionReader with an exact
+// Content-Length (required by AWS S3 presigned PUT URLs, which reject chunked
+// Transfer-Encoding with 501 NotImplemented) and retry-safe GetBody. Unknown
+// streaming readers are spooled to a temporary file rather than buffered in RAM.
+// Any headers returned by the control plane on TemplateBuildFileUpload.Headers
+// (e.g. Azure Blob SAS x-ms-blob-type: BlockBlob) are applied to the PUT
+// request, and Content-Type defaults to application/gzip when not supplied by
+// headers. A 1-hour context timeout is applied only when ctx carries no
+// deadline and RequestTimeoutDisabled is false.
 func (c *Client) uploadFile(ctx context.Context, rawURL string, body io.Reader, headers ...map[string]string) error {
 	if !c.cfg.RequestTimeoutDisabled {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, defaultFileUploadTimeout)
-		defer cancel()
-	}
-
-	var reader *bytes.Reader
-	if br, ok := body.(*bytes.Reader); ok {
-		reader = br
-	} else {
-		var buf bytes.Buffer
-		if body != nil {
-			if _, err := io.Copy(&buf, body); err != nil {
-				return mapTransportErr(err)
-			}
+		if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, defaultFileUploadTimeout)
+			defer cancel()
 		}
-		reader = bytes.NewReader(buf.Bytes())
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, rawURL, reader)
-	if err != nil {
-		return err
+	var (
+		reqBody       io.Reader
+		contentLength int64
+		getBody       func() (io.ReadCloser, error)
+		cleanupTemp   func()
+	)
+	defer func() {
+		if cleanupTemp != nil {
+			cleanupTemp()
+		}
+	}()
+
+	switch r := body.(type) {
+	case nil:
+		reqBody = http.NoBody
+		contentLength = 0
+	case *os.File:
+		info, err := r.Stat()
+		if err != nil {
+			return &UploadError{Err: err}
+		}
+		startOff, err := r.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return &UploadError{Err: err}
+		}
+		contentLength = max(info.Size()-startOff, 0)
+		// Wrap with NopCloser(SectionReader) so net/http closing req.Body does
+		// not close the caller's *os.File while GetBody may still reopen it.
+		reqBody = io.NopCloser(io.NewSectionReader(r, startOff, contentLength))
+		getBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(io.NewSectionReader(r, startOff, contentLength)), nil
+		}
+	case *bytes.Reader:
+		reqBody = r
+		contentLength = int64(r.Len())
+	case *strings.Reader:
+		reqBody = r
+		contentLength = int64(r.Len())
+	case *bytes.Buffer:
+		reqBody = r
+		contentLength = int64(r.Len())
+	default:
+		tmp, err := os.CreateTemp("", "e2b-upload-*.tmp")
+		if err != nil {
+			return &UploadError{Err: err}
+		}
+		tmpPath := tmp.Name()
+		cleanupTemp = func() {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+		}
+		n, err := io.Copy(tmp, r)
+		if err != nil {
+			return mapTransportErr(err)
+		}
+		contentLength = n
+		reqBody = io.NopCloser(io.NewSectionReader(tmp, 0, contentLength))
+		getBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(io.NewSectionReader(tmp, 0, contentLength)), nil
+		}
 	}
-	req.ContentLength = int64(reader.Len())
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, rawURL, reqBody)
+	if err != nil {
+		return &UploadError{Err: err}
+	}
+	req.ContentLength = contentLength
+	if getBody != nil {
+		req.GetBody = getBody
+	}
 	for _, hdrs := range headers {
 		for k, v := range hdrs {
 			if strings.EqualFold(k, "Content-Length") {
@@ -221,7 +314,7 @@ func (c *Client) uploadFile(ctx context.Context, rawURL string, body io.Reader, 
 	if err != nil {
 		return mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return decodeUploadAPIError(resp, "", "")
 	}
@@ -229,17 +322,23 @@ func (c *Client) uploadFile(ctx context.Context, rawURL string, body io.Reader, 
 }
 
 func (c *Client) triggerBuild(ctx context.Context, templateID, buildID string, body apiclient.TemplateBuildStartV2, idempotencyKey string) error {
+	if err := validatePathParam("templateID", templateID); err != nil {
+		return err
+	}
+	if err := validatePathParam("buildID", buildID); err != nil {
+		return err
+	}
 	resp, err := c.apiCli.PostV2TemplatesTemplateIDBuildsBuildID(
 		ctx,
-		apiclient.TemplateID(templateID),
-		apiclient.BuildID(buildID),
+		templateID,
+		buildID,
 		body,
 		idempotencyEditor(idempotencyKey)...,
 	)
 	if err != nil {
 		return mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return decodeBuildAPIError(resp, "trigger", templateID, buildID)
 	}
@@ -263,6 +362,17 @@ func (c *Client) getBuildStatus(ctx context.Context, templateID, buildID string,
 }
 
 func (c *Client) getBuildStatusWithOptions(ctx context.Context, templateID, buildID string, opts BuildStatusOptions) (*BuildStatus, error) {
+	if err := validatePathParam("templateID", templateID); err != nil {
+		return nil, err
+	}
+	if err := validatePathParam("buildID", buildID); err != nil {
+		return nil, err
+	}
+	if opts.LogsOffset < 0 || opts.LogsOffset > math.MaxInt32 {
+		return nil, &e2b.InvalidArgumentError{
+			Message: fmt.Sprintf("BuildStatusOptions.LogsOffset %d out of range [0, %d]", opts.LogsOffset, math.MaxInt32),
+		}
+	}
 	params := &apiclient.GetTemplatesTemplateIDBuildsBuildIDStatusParams{}
 	if opts.LogsOffset > 0 {
 		lo := int32(opts.LogsOffset)
@@ -277,12 +387,12 @@ func (c *Client) getBuildStatusWithOptions(ctx context.Context, templateID, buil
 		params.Level = &lvl
 	}
 	resp, err := c.doWithTokenFallback(fallbackOpBuildStatus, func(cli *apiclient.Client) (*http.Response, error) {
-		return cli.GetTemplatesTemplateIDBuildsBuildIDStatus(ctx, apiclient.TemplateID(templateID), apiclient.BuildID(buildID), params)
+		return cli.GetTemplatesTemplateIDBuildsBuildIDStatus(ctx, templateID, buildID, params)
 	})
 	if err != nil {
 		return nil, mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, decodeBuildAPIError(resp, "poll", templateID, buildID)
 	}
@@ -290,11 +400,8 @@ func (c *Client) getBuildStatusWithOptions(ctx context.Context, templateID, buil
 	if err != nil {
 		return nil, &BuildError{Op: "poll", TemplateID: templateID, BuildID: buildID, Err: err}
 	}
-	if len(raw) == 0 {
-		return nil, &BuildError{Op: "poll", TemplateID: templateID, BuildID: buildID, Err: errors.New("empty response body")}
-	}
-	var wire templateBuildStatusWire
-	if err := json.Unmarshal(raw, &wire); err != nil {
+	wire, err := decodeJSONFallback[templateBuildStatusWire](nil, raw, false)
+	if err != nil {
 		return nil, &BuildError{Op: "poll", TemplateID: templateID, BuildID: buildID, Err: err}
 	}
 	info := apiclient.TemplateBuildInfo{
@@ -340,9 +447,10 @@ func mapBuildStatus(r *apiclient.TemplateBuildInfo) *BuildStatus {
 		for _, le := range r.LogEntries {
 			bs.Logs = append(bs.Logs, toLogEntry(le))
 		}
-	} else if len(r.Logs) > 0 { //nolint:staticcheck // intentional fallback to deprecated r.Logs for legacy self-hosted servers.
-		bs.Logs = make([]LogEntry, 0, len(r.Logs)) //nolint:staticcheck // legacy plain-string logs fallback.
-		for _, line := range r.Logs {              //nolint:staticcheck // legacy plain-string logs fallback.
+	} else if len(r.Logs) > 0 {
+		// Fallback to legacy plain-string logs for older self-hosted servers.
+		bs.Logs = make([]LogEntry, 0, len(r.Logs))
+		for _, line := range r.Logs {
 			bs.Logs = append(bs.Logs, LogEntry{
 				Level:   LogLevelInfo,
 				Message: line,

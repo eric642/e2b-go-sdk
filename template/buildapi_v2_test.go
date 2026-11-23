@@ -110,18 +110,37 @@ func TestBuildInBackgroundV2_EmptyResponseAndTagsRejection(t *testing.T) {
 	}
 	tpl := New().FromImage("alpine:3").RunCmd("echo ok")
 
-	if _, err := c.BuildInBackgroundV2(context.Background(), tpl, BuildOptions{
+	_, err = c.BuildInBackgroundV2(context.Background(), tpl, BuildOptions{
 		Name: "a",
 		Tags: []string{"v1"},
-	}); !errors.As(err, new(*e2b.InvalidArgumentError)) {
+	})
+	if _, ok := errors.AsType[*e2b.InvalidArgumentError](err); !ok {
 		t.Fatalf("tags: want *e2b.InvalidArgumentError, got %T %v", err, err)
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("tags rejection must fail before HTTP request, got %d calls", calls.Load())
 	}
 
-	var be *BuildError
-	if _, err := c.BuildInBackgroundV2(context.Background(), tpl, BuildOptions{Name: "a"}); !errors.As(err, &be) || be.Op != "request" {
+	maxCPU := int32(4)
+	_, err = c.BuildInBackgroundV2(context.Background(), tpl, BuildOptions{
+		Name:        "a",
+		MaxCPUCount: &maxCPU,
+	})
+	if _, ok := errors.AsType[*e2b.InvalidArgumentError](err); !ok {
+		t.Fatalf("MaxCPUCount: want *e2b.InvalidArgumentError, got %T %v", err, err)
+	}
+
+	minDisk := int32(512)
+	_, err = c.BuildInBackgroundV2(context.Background(), tpl, BuildOptions{
+		Name:          "a",
+		MinFreeDiskMB: &minDisk,
+	})
+	if _, ok := errors.AsType[*e2b.InvalidArgumentError](err); !ok {
+		t.Fatalf("MinFreeDiskMB: want *e2b.InvalidArgumentError, got %T %v", err, err)
+	}
+
+	_, err = c.BuildInBackgroundV2(context.Background(), tpl, BuildOptions{Name: "a"})
+	if be, ok := errors.AsType[*BuildError](err); !ok || be.Op != "request" {
 		t.Fatalf("empty 202 body: want *BuildError{Op:request}, got %T %v", err, err)
 	}
 }

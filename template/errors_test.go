@@ -1,8 +1,11 @@
 package template
 
 import (
+	"bytes"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	e2b "github.com/eric642/e2b-go-sdk"
 )
@@ -78,5 +81,26 @@ func TestErrors_SatisfyE2BErrorAndPreserveMetadata(t *testing.T) {
 	}
 	if !errors.Is(ue, e2b.ErrTemplateUpload) {
 		t.Fatal("*UploadError should still match e2b.ErrTemplateUpload")
+	}
+	if got := ue.Error(); !strings.Contains(got, "app.txt") || !strings.Contains(got, "deadbeef") {
+		t.Fatalf("UploadError.Error() = %q", got)
+	}
+}
+
+func TestDefaultLogger_FormatsEntriesAndHandlesNilWriter(t *testing.T) {
+	var buf bytes.Buffer
+	logFn := DefaultLogger(&buf)
+	ts := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	logFn(LogEntry{
+		Timestamp: ts,
+		Level:     LogLevelWarn,
+		Message:   "retrying step",
+	})
+	want := "[2026-04-24T12:00:00Z] warn retrying step\n"
+	if buf.String() != want {
+		t.Fatalf("DefaultLogger output = %q, want %q", buf.String(), want)
+	}
+	if DefaultLogger(nil) == nil {
+		t.Fatal("DefaultLogger(nil) returned nil")
 	}
 }

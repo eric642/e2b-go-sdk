@@ -2,14 +2,7 @@ package template
 
 import "testing"
 
-func TestTypesCompileAndZeroValue(t *testing.T) {
-	_ = BuildInfo{}
-	_ = BuildEvent{}
-	_ = BuildStatus{Status: BuildStatusReady}
-	_ = BuildReason{}
-	_ = TagInfo{}
-	_ = TemplateTag{}
-
+func TestBuildStatusConstants(t *testing.T) {
 	if BuildStatusBuilding != "building" ||
 		BuildStatusWaiting != "waiting" ||
 		BuildStatusReady != "ready" ||

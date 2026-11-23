@@ -2,31 +2,42 @@ package template
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
 	"io"
 	"os"
 	"path/filepath"
 )
 
-func tarFileBytes(src, contextDir string, ignorePatterns []string, resolveSymlinks bool) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := writeTarToWriter(&buf, src, contextDir, ignorePatterns, resolveSymlinks); err != nil {
-		return nil, err
+// tarFileToTemp writes a gzipped tar archive of files matching src to a
+// temporary file on disk, returning the open file positioned at offset 0, its
+// exact byte size, and a cleanup callback that closes and deletes the temp
+// file. Spooling to disk keeps memory bounded for large COPY contexts while
+// giving presigned uploads an exact Content-Length and retry-safe GetBody.
+func tarFileToTemp(src, contextDir string, ignorePatterns []string, resolveSymlinks bool) (*os.File, int64, func(), error) {
+	tmp, err := os.CreateTemp("", "e2b-template-*.tar.gz")
+	if err != nil {
+		return nil, 0, nil, err
 	}
-	return buf.Bytes(), nil
-}
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}
 
-func tarFileStream(src, contextDir string, ignorePatterns []string, resolveSymlinks bool) (io.ReadCloser, <-chan error) {
-	pr, pw := io.Pipe()
-	errc := make(chan error, 1)
-	go func() {
-		err := writeTarToWriter(pw, src, contextDir, ignorePatterns, resolveSymlinks)
-		_ = pw.CloseWithError(err)
-		errc <- err
-		close(errc)
-	}()
-	return pr, errc
+	if err := writeTarToWriter(tmp, src, contextDir, ignorePatterns, resolveSymlinks); err != nil {
+		cleanup()
+		return nil, 0, nil, err
+	}
+	info, err := tmp.Stat()
+	if err != nil {
+		cleanup()
+		return nil, 0, nil, err
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		cleanup()
+		return nil, 0, nil, err
+	}
+	return tmp, info.Size(), cleanup, nil
 }
 
 func writeTarToWriter(w io.Writer, src, contextDir string, ignorePatterns []string, resolveSymlinks bool) error {
@@ -72,7 +83,17 @@ func addTarEntry(tw *tar.Writer, abs, contextDir string, resolveSymlinks bool) e
 	}
 
 	if lst.Mode()&os.ModeSymlink != 0 {
-		if !resolveSymlinks {
+		shouldFollow := resolveSymlinks
+		if shouldFollow {
+			if targetInfo, err := os.Stat(abs); err == nil {
+				lst = targetInfo
+			} else {
+				// Broken symlink: fall back to preserving the symlink header
+				// so tar packaging matches calculateFilesHash.
+				shouldFollow = false
+			}
+		}
+		if !shouldFollow {
 			target, err := os.Readlink(abs)
 			if err != nil {
 				return err
@@ -83,10 +104,6 @@ func addTarEntry(tw *tar.Writer, abs, contextDir string, resolveSymlinks bool) e
 			}
 			hdr.Name = filepath.ToSlash(rel)
 			return tw.WriteHeader(hdr)
-		}
-		lst, err = os.Stat(abs)
-		if err != nil {
-			return err
 		}
 	}
 
@@ -105,7 +122,7 @@ func addTarEntry(tw *tar.Writer, abs, contextDir string, resolveSymlinks bool) e
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	_, err = io.Copy(tw, f)
 	return err
 }

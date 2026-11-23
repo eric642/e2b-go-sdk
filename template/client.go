@@ -92,13 +92,18 @@ func (c *Client) doWithTokenFallback(op fallbackOp, fn func(*apiclient.Client) (
 		return fn(c.tokenAPICli)
 	}
 	resp, err := fn(c.apiCli)
-	if err != nil || resp.StatusCode != http.StatusUnauthorized || c.tokenAPICli == nil {
+	if err != nil || resp == nil || resp.StatusCode != http.StatusUnauthorized || c.tokenAPICli == nil {
 		return resp, err
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxFallbackDrainBytes))
-	_ = resp.Body.Close()
+	if resp.Body != nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxFallbackDrainBytes))
+		_ = resp.Body.Close()
+	}
 	retryResp, retryErr := fn(c.tokenAPICli)
-	if retryErr == nil && retryResp.StatusCode != http.StatusUnauthorized {
+	if retryErr == nil && retryResp != nil &&
+		retryResp.StatusCode != http.StatusUnauthorized &&
+		retryResp.StatusCode != http.StatusForbidden &&
+		retryResp.StatusCode < http.StatusInternalServerError {
 		c.tokenFallbackMask.Or(uint32(op))
 	}
 	return retryResp, retryErr

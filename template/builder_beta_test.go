@@ -2,6 +2,7 @@ package template
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	e2b "github.com/eric642/e2b-go-sdk"
@@ -12,9 +13,8 @@ func TestAddMCPServer_RequiresMCPGatewayBase(t *testing.T) {
 	if _, err := b.serialize(false); err == nil {
 		t.Fatal("expected error because base isn't mcp-gateway")
 	}
-	var invalid *e2b.InvalidArgumentError
 	_, err := b.serialize(false)
-	if !errors.As(err, &invalid) {
+	if _, ok := errors.AsType[*e2b.InvalidArgumentError](err); !ok {
 		t.Fatalf("expected InvalidArgumentError, got %T: %v", err, err)
 	}
 	if len(b.instructions) != 0 {
@@ -62,16 +62,7 @@ func TestBetaMethods_DontOverwritePriorErr(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if msg := err.Error(); !contains(msg, "must be a relative path") {
+	if msg := err.Error(); !strings.Contains(msg, "must be a relative path") {
 		t.Fatalf("expected first error (absolute path) to be preserved, got %q", msg)
 	}
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

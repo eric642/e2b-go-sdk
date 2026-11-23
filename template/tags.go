@@ -2,8 +2,6 @@ package template
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 
@@ -18,13 +16,18 @@ import (
 // Endpoint: GET /templates/aliases/{alias}
 // Compatibility: E2B Cloud; self-hosted runtime 2026.02..2026.30 (not in < 2026.02).
 func (c *Client) Exists(ctx context.Context, alias string) (bool, error) {
+	if err := validatePathParam("alias", alias); err != nil {
+		return false, err
+	}
 	resp, err := c.apiCli.GetTemplatesAliasesAlias(ctx, alias)
 	if err != nil {
 		return false, mapTransportErr(err)
 	}
 	defer func() {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		_ = resp.Body.Close()
+		if resp.Body != nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			_ = resp.Body.Close()
+		}
 	}()
 	switch resp.StatusCode {
 	case http.StatusNotFound:
@@ -61,7 +64,7 @@ func (c *Client) AssignTagsWithOptions(ctx context.Context, target string, tags 
 	if err != nil {
 		return nil, mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, decodeBuildAPIError(resp, "tags.assign", "", "")
 	}
@@ -69,18 +72,11 @@ func (c *Client) AssignTagsWithOptions(ctx context.Context, target string, tags 
 	if err != nil {
 		return nil, &BuildError{Op: "tags.assign", Err: err}
 	}
-	// The generated parser only populates JSON201 for the documented 201
-	// response. Accept any 2xx by decoding the raw body as a fallback.
-	if parsed.JSON201 != nil {
-		return &TagInfo{BuildID: parsed.JSON201.BuildID.String(), Tags: parsed.JSON201.Tags}, nil
+	out, err := decodeJSONFallback(parsed.JSON201, parsed.Body, false)
+	if err != nil {
+		return nil, &BuildError{Op: "tags.assign", Err: err}
 	}
-	if len(parsed.Body) > 0 {
-		var out apiclient.AssignedTemplateTags
-		if err := json.Unmarshal(parsed.Body, &out); err == nil {
-			return &TagInfo{BuildID: out.BuildID.String(), Tags: out.Tags}, nil
-		}
-	}
-	return nil, &BuildError{Op: "tags.assign", Err: errors.New("empty response body")}
+	return &TagInfo{BuildID: out.BuildID.String(), Tags: out.Tags}, nil
 }
 
 // RemoveTags removes one or more tags from a template.
@@ -93,7 +89,7 @@ func (c *Client) RemoveTags(ctx context.Context, name string, tags []string) err
 	if err != nil {
 		return mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return decodeBuildAPIError(resp, "tags.remove", "", "")
 	}
@@ -105,11 +101,14 @@ func (c *Client) RemoveTags(ctx context.Context, name string, tags []string) err
 // Endpoint: GET /templates/{templateID}/tags
 // Compatibility: E2B Cloud; self-hosted runtime 2026.07..2026.30 (not in < 2026.07).
 func (c *Client) GetTags(ctx context.Context, templateID string) ([]TemplateTag, error) {
-	resp, err := c.apiCli.GetTemplatesTemplateIDTags(ctx, apiclient.TemplateID(templateID))
+	if err := validatePathParam("templateID", templateID); err != nil {
+		return nil, err
+	}
+	resp, err := c.apiCli.GetTemplatesTemplateIDTags(ctx, templateID)
 	if err != nil {
 		return nil, mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, decodeBuildAPIError(resp, "tags.get", templateID, "")
 	}
@@ -117,13 +116,9 @@ func (c *Client) GetTags(ctx context.Context, templateID string) ([]TemplateTag,
 	if err != nil {
 		return nil, &BuildError{Op: "tags.get", TemplateID: templateID, Err: err}
 	}
-	var rows []apiclient.TemplateTag
-	if parsed.JSON200 != nil {
-		rows = *parsed.JSON200
-	} else if len(parsed.Body) > 0 {
-		if err := json.Unmarshal(parsed.Body, &rows); err != nil {
-			return nil, &BuildError{Op: "tags.get", TemplateID: templateID, Err: err}
-		}
+	rows, err := decodeJSONFallback(parsed.JSON200, parsed.Body, true)
+	if err != nil {
+		return nil, &BuildError{Op: "tags.get", TemplateID: templateID, Err: err}
 	}
 	out := make([]TemplateTag, 0, len(rows))
 	for _, it := range rows {
@@ -142,11 +137,14 @@ func (c *Client) GetTags(ctx context.Context, templateID string) ([]TemplateTag,
 // Endpoint: GET /templates/{templateID}/tags/count
 // Compatibility: E2B Cloud only (not in self-hosted runtime <= 2026.30).
 func (c *Client) CountTags(ctx context.Context, templateID string) (int64, error) {
-	resp, err := c.apiCli.GetTemplatesTemplateIDTagsCount(ctx, apiclient.TemplateID(templateID))
+	if err := validatePathParam("templateID", templateID); err != nil {
+		return 0, err
+	}
+	resp, err := c.apiCli.GetTemplatesTemplateIDTagsCount(ctx, templateID)
 	if err != nil {
 		return 0, mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return 0, decodeBuildAPIError(resp, "tags.count", templateID, "")
 	}
@@ -154,16 +152,11 @@ func (c *Client) CountTags(ctx context.Context, templateID string) (int64, error
 	if err != nil {
 		return 0, &BuildError{Op: "tags.count", TemplateID: templateID, Err: err}
 	}
-	if parsed.JSON200 != nil {
-		return parsed.JSON200.Total, nil
+	out, err := decodeJSONFallback(parsed.JSON200, parsed.Body, false)
+	if err != nil {
+		return 0, &BuildError{Op: "tags.count", TemplateID: templateID, Err: err}
 	}
-	if len(parsed.Body) > 0 {
-		var out apiclient.TemplateTagsCountResponse
-		if err := json.Unmarshal(parsed.Body, &out); err == nil {
-			return out.Total, nil
-		}
-	}
-	return 0, &BuildError{Op: "tags.count", TemplateID: templateID, Err: errors.New("empty response body")}
+	return out.Total, nil
 }
 
 // TagExists checks whether a tag on the given template has at least one ready
@@ -172,15 +165,18 @@ func (c *Client) CountTags(ctx context.Context, templateID string) (int64, error
 // Endpoint: GET /templates/{templateID}/tags/exists
 // Compatibility: E2B Cloud only (not in self-hosted runtime <= 2026.30).
 func (c *Client) TagExists(ctx context.Context, templateID, tag string) (*TagExistsResult, error) {
+	if err := validatePathParam("templateID", templateID); err != nil {
+		return nil, err
+	}
 	if tag == "" {
 		return nil, &e2b.InvalidArgumentError{Message: "tag is required"}
 	}
 	params := &apiclient.GetTemplatesTemplateIDTagsExistsParams{Tag: tag}
-	resp, err := c.apiCli.GetTemplatesTemplateIDTagsExists(ctx, apiclient.TemplateID(templateID), params)
+	resp, err := c.apiCli.GetTemplatesTemplateIDTagsExists(ctx, templateID, params)
 	if err != nil {
 		return nil, mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, decodeBuildAPIError(resp, "tags.exists", templateID, "")
 	}
@@ -188,22 +184,14 @@ func (c *Client) TagExists(ctx context.Context, templateID, tag string) (*TagExi
 	if err != nil {
 		return nil, &BuildError{Op: "tags.exists", TemplateID: templateID, Err: err}
 	}
-	if parsed.JSON200 != nil {
-		return &TagExistsResult{
-			Exists:        parsed.JSON200.Exists,
-			NormalizedTag: parsed.JSON200.NormalizedTag,
-		}, nil
+	out, err := decodeJSONFallback(parsed.JSON200, parsed.Body, false)
+	if err != nil {
+		return nil, &BuildError{Op: "tags.exists", TemplateID: templateID, Err: err}
 	}
-	if len(parsed.Body) > 0 {
-		var out apiclient.TemplateTagExistsResponse
-		if err := json.Unmarshal(parsed.Body, &out); err == nil {
-			return &TagExistsResult{
-				Exists:        out.Exists,
-				NormalizedTag: out.NormalizedTag,
-			}, nil
-		}
-	}
-	return nil, &BuildError{Op: "tags.exists", TemplateID: templateID, Err: errors.New("empty response body")}
+	return &TagExistsResult{
+		Exists:        out.Exists,
+		NormalizedTag: out.NormalizedTag,
+	}, nil
 }
 
 // ListTagGroups lists the template's tags that have at least one ready build,
@@ -212,6 +200,9 @@ func (c *Client) TagExists(ctx context.Context, templateID, tag string) (*TagExi
 // Endpoint: GET /templates/{templateID}/tags/groups
 // Compatibility: E2B Cloud only (not in self-hosted runtime <= 2026.30).
 func (c *Client) ListTagGroups(ctx context.Context, templateID string, opts TagGroupsOptions) (*TagGroupsPage, error) {
+	if err := validatePathParam("templateID", templateID); err != nil {
+		return nil, err
+	}
 	params := &apiclient.GetTemplatesTemplateIDTagsGroupsParams{}
 	if opts.AssignmentLimit > 0 {
 		al := opts.AssignmentLimit
@@ -234,11 +225,11 @@ func (c *Client) ListTagGroups(ctx context.Context, templateID string, opts TagG
 		params.Sort = &sortVal
 	}
 
-	resp, err := c.apiCli.GetTemplatesTemplateIDTagsGroups(ctx, apiclient.TemplateID(templateID), params)
+	resp, err := c.apiCli.GetTemplatesTemplateIDTagsGroups(ctx, templateID, params)
 	if err != nil {
 		return nil, mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, decodeBuildAPIError(resp, "tags.groups", templateID, "")
 	}
@@ -246,16 +237,9 @@ func (c *Client) ListTagGroups(ctx context.Context, templateID string, opts TagG
 	if err != nil {
 		return nil, &BuildError{Op: "tags.groups", TemplateID: templateID, Err: err}
 	}
-	var body apiclient.TemplateTagGroupsResponse
-	switch {
-	case parsed.JSON200 != nil:
-		body = *parsed.JSON200
-	case len(parsed.Body) > 0:
-		if err := json.Unmarshal(parsed.Body, &body); err != nil {
-			return nil, &BuildError{Op: "tags.groups", TemplateID: templateID, Err: err}
-		}
-	default:
-		return nil, &BuildError{Op: "tags.groups", TemplateID: templateID, Err: errors.New("empty response body")}
+	body, err := decodeJSONFallback(parsed.JSON200, parsed.Body, false)
+	if err != nil {
+		return nil, &BuildError{Op: "tags.groups", TemplateID: templateID, Err: err}
 	}
 
 	page := &TagGroupsPage{
@@ -284,8 +268,11 @@ func (c *Client) ListTagGroups(ctx context.Context, templateID string, opts TagG
 // Endpoint: GET /templates/{templateID}/tags/{tag}/assignments
 // Compatibility: E2B Cloud only (not in self-hosted runtime <= 2026.30).
 func (c *Client) GetTagAssignments(ctx context.Context, templateID, tag string, opts TagAssignmentsOptions) (*TagAssignmentsPage, error) {
-	if tag == "" {
-		return nil, &e2b.InvalidArgumentError{Message: "tag is required"}
+	if err := validatePathParam("templateID", templateID); err != nil {
+		return nil, err
+	}
+	if err := validatePathParam("tag", tag); err != nil {
+		return nil, err
 	}
 	params := &apiclient.GetTemplatesTemplateIDTagsTagAssignmentsParams{}
 	if opts.Cursor != "" {
@@ -296,11 +283,11 @@ func (c *Client) GetTagAssignments(ctx context.Context, templateID, tag string, 
 		lim := opts.Limit
 		params.Limit = &lim
 	}
-	resp, err := c.apiCli.GetTemplatesTemplateIDTagsTagAssignments(ctx, apiclient.TemplateID(templateID), tag, params)
+	resp, err := c.apiCli.GetTemplatesTemplateIDTagsTagAssignments(ctx, templateID, tag, params)
 	if err != nil {
 		return nil, mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, decodeBuildAPIError(resp, "tags.assignments", templateID, "")
 	}
@@ -308,16 +295,9 @@ func (c *Client) GetTagAssignments(ctx context.Context, templateID, tag string, 
 	if err != nil {
 		return nil, &BuildError{Op: "tags.assignments", TemplateID: templateID, Err: err}
 	}
-	var body apiclient.TemplateTagAssignmentsResponse
-	switch {
-	case parsed.JSON200 != nil:
-		body = *parsed.JSON200
-	case len(parsed.Body) > 0:
-		if err := json.Unmarshal(parsed.Body, &body); err != nil {
-			return nil, &BuildError{Op: "tags.assignments", TemplateID: templateID, Err: err}
-		}
-	default:
-		return nil, &BuildError{Op: "tags.assignments", TemplateID: templateID, Err: errors.New("empty response body")}
+	body, err := decodeJSONFallback(parsed.JSON200, parsed.Body, false)
+	if err != nil {
+		return nil, &BuildError{Op: "tags.assignments", TemplateID: templateID, Err: err}
 	}
 
 	page := &TagAssignmentsPage{
@@ -348,13 +328,16 @@ func toTagAssignment(a apiclient.TemplateTagAssignment) TagAssignment {
 // Endpoint: DELETE /templates/{templateID}
 // Compatibility: E2B Cloud; self-hosted runtime <= 2026.30.
 func (c *Client) Delete(ctx context.Context, templateID string) error {
+	if err := validatePathParam("templateID", templateID); err != nil {
+		return err
+	}
 	resp, err := c.doWithTokenFallback(fallbackOpDelete, func(cli *apiclient.Client) (*http.Response, error) {
-		return cli.DeleteTemplatesTemplateID(ctx, apiclient.TemplateID(templateID))
+		return cli.DeleteTemplatesTemplateID(ctx, templateID)
 	})
 	if err != nil {
 		return mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return decodeBuildAPIError(resp, "delete", templateID, "")
 	}
@@ -368,15 +351,20 @@ func (c *Client) Delete(ctx context.Context, templateID string) error {
 // Endpoint: DELETE /templates/{templateID}
 // Compatibility: E2B Cloud; self-hosted runtime <= 2026.30.
 func (c *Client) Destroy(ctx context.Context, templateID string) (bool, error) {
+	if err := validatePathParam("templateID", templateID); err != nil {
+		return false, err
+	}
 	resp, err := c.doWithTokenFallback(fallbackOpDelete, func(cli *apiclient.Client) (*http.Response, error) {
-		return cli.DeleteTemplatesTemplateID(ctx, apiclient.TemplateID(templateID))
+		return cli.DeleteTemplatesTemplateID(ctx, templateID)
 	})
 	if err != nil {
 		return false, mapTransportErr(err)
 	}
 	defer func() {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		_ = resp.Body.Close()
+		if resp.Body != nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			_ = resp.Body.Close()
+		}
 	}()
 	if resp.StatusCode == http.StatusNotFound {
 		return false, nil

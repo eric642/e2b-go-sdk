@@ -250,7 +250,8 @@ type BuildLogsOptions struct {
 	CursorMs int64
 	// Limit caps the number of log entries returned (0–1000). 0 means server default.
 	Limit int32
-	// Direction is "asc" or "desc". Empty means server default.
+	// Direction is "forward" (e2b.LogsDirectionForward) or "backward"
+	// (e2b.LogsDirectionBackward). Empty means server default.
 	Direction string
 	// Level filters out entries below this level. Empty means no filter.
 	Level LogLevel

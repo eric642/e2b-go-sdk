@@ -1,12 +1,16 @@
 # Hash fixtures
 
-Fixtures consumed by `TestCalculateFilesHash`. The test validates
-determinism and input-sensitivity of `calculateFilesHash`; it does not
-pin byte-exact golden hashes.
+Minimal fixture trees (`single/`, `nested/`, `ignored/`) consumed by
+`TestCalculateFilesHash` and `TestCalculateFilesHash_UpstreamGoldenParity`
+in `template/hash_test.go`.
 
-Cross-SDK byte-exact parity with the Python SDK's
-`calculate_files_hash` (needed for shared cache hits) is validated in
-an integration context, not here — pinning a byte-exact golden in a
-unit test is flaky across machines because the hash incorporates
-directory `stat()` output whose permission bits vary with umask,
-filesystem, and ACLs.
+Because `calculateFilesHash` excludes filesystem-dependent directory sizes
+(matching upstream Python `utils.py` and JS `utils.ts`), the expected digests
+are deterministic across macOS APFS and Linux ext4 once file/directory modes
+are normalized to `0644`/`0755`.
+
+The expected SHA-256 digests (verified directly against upstream
+`E2B/packages/dockerfile-utils-js/src/dockerignore.ts` `PatternMatcher` and
+Python `utils.py::calculate_files_hash` semantics) and the `dockerignore`
+fixture tree (covering `node_modules`, `dist/`, `/secret.txt`, and
+`!dist/keep.txt`) live directly in `template/hash_test.go`.

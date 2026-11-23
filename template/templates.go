@@ -2,12 +2,12 @@ package template
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
 
+	e2b "github.com/eric642/e2b-go-sdk"
 	apiclient "github.com/eric642/e2b-go-sdk/internal/api"
 )
 
@@ -29,12 +29,12 @@ func (c *Client) List(ctx context.Context, opts ListOptions) ([]Template, error)
 		params.TeamID = &tid
 	}
 	resp, err := c.doWithTokenFallback(fallbackOpList, func(cli *apiclient.Client) (*http.Response, error) {
-		return cli.GetTemplates(ctx, params) //nolint:staticcheck // legacy v1 route retained for self-hosted < 2026.26 compatibility.
+		return cli.GetTemplates(ctx, params) // legacy v1 route retained for self-hosted < 2026.26 compatibility.
 	})
 	if err != nil {
 		return nil, mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, decodeBuildAPIError(resp, "list", "", "")
 	}
@@ -42,13 +42,9 @@ func (c *Client) List(ctx context.Context, opts ListOptions) ([]Template, error)
 	if err != nil {
 		return nil, &BuildError{Op: "list", Err: err}
 	}
-	var rows []apiclient.Template
-	if parsed.JSON200 != nil {
-		rows = *parsed.JSON200
-	} else if len(parsed.Body) > 0 {
-		if err := json.Unmarshal(parsed.Body, &rows); err != nil {
-			return nil, &BuildError{Op: "list", Err: err}
-		}
+	rows, err := decodeJSONFallback(parsed.JSON200, parsed.Body, true)
+	if err != nil {
+		return nil, &BuildError{Op: "list", Err: err}
 	}
 	out := make([]Template, 0, len(rows))
 	for _, row := range rows {
@@ -106,11 +102,11 @@ func (p *TemplatePaginator) NextItems(ctx context.Context) ([]Template, error) {
 			params.TeamID = &tid
 		}
 		if p.opts.Limit > 0 {
-			lim := apiclient.PaginationLimit(p.opts.Limit)
+			lim := p.opts.Limit
 			params.Limit = &lim
 		}
 		if p.next != "" {
-			tok := apiclient.PaginationNextToken(p.next)
+			tok := p.next
 			params.NextToken = &tok
 		}
 
@@ -130,17 +126,13 @@ func (p *TemplatePaginator) NextItems(ctx context.Context) ([]Template, error) {
 			return nil, &BuildError{Op: "listV2", Err: err}
 		}
 
+		rows, err := decodeJSONFallback(parsed.JSON200, parsed.Body, true)
+		if err != nil {
+			return nil, &BuildError{Op: "listV2", Err: err}
+		}
+
 		p.next = token
 		p.hasNext = token != ""
-
-		var rows []apiclient.Template
-		if parsed.JSON200 != nil {
-			rows = *parsed.JSON200
-		} else if len(parsed.Body) > 0 {
-			if err := json.Unmarshal(parsed.Body, &rows); err != nil {
-				return nil, &BuildError{Op: "listV2", Err: err}
-			}
-		}
 
 		out := make([]Template, 0, len(rows))
 		for _, row := range rows {
@@ -227,7 +219,7 @@ func (c *Client) ListDefault(ctx context.Context) ([]Template, error) {
 	if err != nil {
 		return nil, mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, decodeBuildAPIError(resp, "listDefault", "", "")
 	}
@@ -235,13 +227,9 @@ func (c *Client) ListDefault(ctx context.Context) ([]Template, error) {
 	if err != nil {
 		return nil, &BuildError{Op: "listDefault", Err: err}
 	}
-	var rows []apiclient.Template
-	if parsed.JSON200 != nil {
-		rows = *parsed.JSON200
-	} else if len(parsed.Body) > 0 {
-		if err := json.Unmarshal(parsed.Body, &rows); err != nil {
-			return nil, &BuildError{Op: "listDefault", Err: err}
-		}
+	rows, err := decodeJSONFallback(parsed.JSON200, parsed.Body, true)
+	if err != nil {
+		return nil, &BuildError{Op: "listDefault", Err: err}
 	}
 	out := make([]Template, 0, len(rows))
 	for _, row := range rows {
@@ -257,22 +245,25 @@ func (c *Client) ListDefault(ctx context.Context) ([]Template, error) {
 // Endpoint: GET /templates/{templateID}
 // Compatibility: E2B Cloud; self-hosted runtime 2025.45..2026.30 (not in < 2025.45).
 func (c *Client) Get(ctx context.Context, templateID string, opts GetOptions) (*TemplateDetail, error) {
+	if err := validatePathParam("templateID", templateID); err != nil {
+		return nil, err
+	}
 	params := &apiclient.GetTemplatesTemplateIDParams{}
 	if opts.NextToken != "" {
-		tok := apiclient.PaginationNextToken(opts.NextToken)
+		tok := opts.NextToken
 		params.NextToken = &tok
 	}
 	if opts.Limit > 0 {
-		lim := apiclient.PaginationLimit(opts.Limit)
+		lim := opts.Limit
 		params.Limit = &lim
 	}
 	resp, err := c.doWithTokenFallback(fallbackOpGet, func(cli *apiclient.Client) (*http.Response, error) {
-		return cli.GetTemplatesTemplateID(ctx, apiclient.TemplateID(templateID), params)
+		return cli.GetTemplatesTemplateID(ctx, templateID, params)
 	})
 	if err != nil {
 		return nil, mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, decodeBuildAPIError(resp, "get", templateID, "")
 	}
@@ -281,35 +272,29 @@ func (c *Client) Get(ctx context.Context, templateID string, opts GetOptions) (*
 	if err != nil {
 		return nil, &BuildError{Op: "get", TemplateID: templateID, Err: err}
 	}
-	var body apiclient.TemplateWithBuilds
-	switch {
-	case parsed.JSON200 != nil:
-		body = *parsed.JSON200
-	case len(parsed.Body) > 0:
-		if err := json.Unmarshal(parsed.Body, &body); err != nil {
-			return nil, &BuildError{Op: "get", TemplateID: templateID, Err: err}
-		}
-	default:
-		return nil, &BuildError{Op: "get", TemplateID: templateID, Err: errors.New("empty response body")}
+	body, err := decodeJSONFallback(parsed.JSON200, parsed.Body, false)
+	if err != nil {
+		return nil, &BuildError{Op: "get", TemplateID: templateID, Err: err}
 	}
 	if nextToken == "" && parsed.Headers200 != nil && parsed.Headers200.XNextToken != nil {
 		nextToken = *parsed.Headers200.XNextToken
 	}
 
 	names := body.Names
-	if len(names) == 0 && len(body.Aliases) > 0 { //nolint:staticcheck // fallback to deprecated aliases on older servers.
-		names = slices.Clone(body.Aliases) //nolint:staticcheck // fallback to deprecated aliases on older servers.
+	if len(names) == 0 && len(body.Aliases) > 0 {
+		// Fallback to legacy aliases on older servers.
+		names = slices.Clone(body.Aliases)
 	}
 	detail := &TemplateDetail{
 		TemplateID:    body.TemplateID,
 		BuildID:       body.BuildID,
 		Names:         names,
-		Aliases:       slices.Clone(body.Aliases), //nolint:staticcheck // expose legacy aliases alongside names.
+		Aliases:       slices.Clone(body.Aliases), // expose legacy aliases alongside names.
 		Public:        body.Public,
-		CPUCount:      int32(body.CpuCount),
-		MemoryMB:      int32(body.MemoryMB),
-		DiskSizeMB:    int32(body.DiskSizeMB),
-		EnvdVersion:   string(body.EnvdVersion),
+		CPUCount:      body.CpuCount,
+		MemoryMB:      body.MemoryMB,
+		DiskSizeMB:    body.DiskSizeMB,
+		EnvdVersion:   body.EnvdVersion,
 		BuildStatus:   BuildStatusValue(body.BuildStatus),
 		BuildCount:    body.BuildCount,
 		SpawnCount:    body.SpawnCount,
@@ -325,15 +310,15 @@ func (c *Client) Get(ctx context.Context, templateID string, opts GetOptions) (*
 		detail.IsDefault = *body.IsDefault
 	}
 	if body.MaxCpuCount != nil {
-		mcc := int32(*body.MaxCpuCount)
+		mcc := *body.MaxCpuCount
 		detail.MaxCPUCount = &mcc
 	}
 	if body.CreatedBy != nil {
 		detail.CreatedBy = &TemplateUser{
 			ID: body.CreatedBy.Id.String(),
 		}
-		if body.CreatedBy.Email != nil { //nolint:staticcheck // expose creator email when provided by server.
-			detail.CreatedBy.Email = *body.CreatedBy.Email //nolint:staticcheck // expose creator email when provided by server.
+		if body.CreatedBy.Email != nil {
+			detail.CreatedBy.Email = *body.CreatedBy.Email
 		}
 	}
 	detail.Builds = make([]TemplateBuild, 0, len(body.Builds))
@@ -350,12 +335,15 @@ func (c *Client) Get(ctx context.Context, templateID string, opts GetOptions) (*
 // Endpoint: PATCH /v2/templates/{templateID}
 // Compatibility: E2B Cloud; self-hosted runtime 2026.05..2026.30 (use SetPublicV1 on < 2026.05).
 func (c *Client) SetPublic(ctx context.Context, templateID string, public bool) ([]string, error) {
+	if err := validatePathParam("templateID", templateID); err != nil {
+		return nil, err
+	}
 	body := apiclient.PatchV2TemplatesTemplateIDJSONRequestBody{Public: &public}
-	resp, err := c.apiCli.PatchV2TemplatesTemplateID(ctx, apiclient.TemplateID(templateID), body)
+	resp, err := c.apiCli.PatchV2TemplatesTemplateID(ctx, templateID, body)
 	if err != nil {
 		return nil, mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, decodeBuildAPIError(resp, "setPublic", templateID, "")
 	}
@@ -363,16 +351,11 @@ func (c *Client) SetPublic(ctx context.Context, templateID string, public bool) 
 	if err != nil {
 		return nil, &BuildError{Op: "setPublic", TemplateID: templateID, Err: err}
 	}
-	if parsed.JSON200 != nil {
-		return parsed.JSON200.Names, nil
+	out, err := decodeJSONFallback(parsed.JSON200, parsed.Body, false)
+	if err != nil {
+		return nil, &BuildError{Op: "setPublic", TemplateID: templateID, Err: err}
 	}
-	if len(parsed.Body) > 0 {
-		var out apiclient.TemplateUpdateResponse
-		if err := json.Unmarshal(parsed.Body, &out); err == nil {
-			return out.Names, nil
-		}
-	}
-	return nil, &BuildError{Op: "setPublic", TemplateID: templateID, Err: errors.New("empty response body")}
+	return out.Names, nil
 }
 
 // SetPublicV1 toggles template public visibility via PATCH /templates/{templateID}.
@@ -388,14 +371,17 @@ func (c *Client) SetPublic(ctx context.Context, templateID string, public bool) 
 // Endpoint: PATCH /templates/{templateID}
 // Compatibility: E2B Cloud and self-hosted runtime <= 2026.30 (actively served everywhere; soft-deprecated in OpenAPI since runtime 2026.05 in favor of SetPublic, required on self-hosted runtime < 2026.05).
 func (c *Client) SetPublicV1(ctx context.Context, templateID string, public bool) error {
+	if err := validatePathParam("templateID", templateID); err != nil {
+		return err
+	}
 	body := apiclient.PatchTemplatesTemplateIDJSONRequestBody{Public: &public} //nolint:staticcheck // legacy v1 route kept for old self-hosted servers.
 	resp, err := c.doWithTokenFallback(fallbackOpSetPublicV1, func(cli *apiclient.Client) (*http.Response, error) {
-		return cli.PatchTemplatesTemplateID(ctx, apiclient.TemplateID(templateID), body) //nolint:staticcheck // legacy v1 route kept for old self-hosted servers.
+		return cli.PatchTemplatesTemplateID(ctx, templateID, body) // legacy v1 route kept for old self-hosted servers.
 	})
 	if err != nil {
 		return mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return decodeBuildAPIError(resp, "setPublic", templateID, "")
 	}
@@ -407,6 +393,18 @@ func (c *Client) SetPublicV1(ctx context.Context, templateID string, public bool
 // Endpoint: GET /templates/{templateID}/builds/{buildID}/logs
 // Compatibility: E2B Cloud; self-hosted runtime 2025.50..2026.30 (not in < 2025.50; use GetBuildStatus logs).
 func (c *Client) GetBuildLogs(ctx context.Context, templateID, buildID string, opts BuildLogsOptions) ([]LogEntry, error) {
+	if err := validatePathParam("templateID", templateID); err != nil {
+		return nil, err
+	}
+	if err := validatePathParam("buildID", buildID); err != nil {
+		return nil, err
+	}
+	if opts.Direction != "" && opts.Direction != e2b.LogsDirectionForward && opts.Direction != e2b.LogsDirectionBackward {
+		return nil, &e2b.InvalidArgumentError{
+			Message: fmt.Sprintf("BuildLogsOptions.Direction must be %q or %q, got %q",
+				e2b.LogsDirectionForward, e2b.LogsDirectionBackward, opts.Direction),
+		}
+	}
 	params := &apiclient.GetTemplatesTemplateIDBuildsBuildIDLogsParams{}
 	if opts.CursorMs != 0 {
 		c := opts.CursorMs
@@ -428,12 +426,11 @@ func (c *Client) GetBuildLogs(ctx context.Context, templateID, buildID string, o
 		s := apiclient.LogsSource(opts.Source)
 		params.Source = &s
 	}
-	resp, err := c.apiCli.GetTemplatesTemplateIDBuildsBuildIDLogs(ctx,
-		apiclient.TemplateID(templateID), apiclient.BuildID(buildID), params)
+	resp, err := c.apiCli.GetTemplatesTemplateIDBuildsBuildIDLogs(ctx, templateID, buildID, params)
 	if err != nil {
 		return nil, mapTransportErr(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, decodeBuildAPIError(resp, "buildLogs", templateID, buildID)
 	}
@@ -441,14 +438,9 @@ func (c *Client) GetBuildLogs(ctx context.Context, templateID, buildID string, o
 	if err != nil {
 		return nil, &BuildError{Op: "buildLogs", TemplateID: templateID, BuildID: buildID, Err: err}
 	}
-	var body apiclient.TemplateBuildLogsResponse
-	switch {
-	case parsed.JSON200 != nil:
-		body = *parsed.JSON200
-	case len(parsed.Body) > 0:
-		if err := json.Unmarshal(parsed.Body, &body); err != nil {
-			return nil, &BuildError{Op: "buildLogs", TemplateID: templateID, BuildID: buildID, Err: err}
-		}
+	body, err := decodeJSONFallback(parsed.JSON200, parsed.Body, true)
+	if err != nil {
+		return nil, &BuildError{Op: "buildLogs", TemplateID: templateID, BuildID: buildID, Err: err}
 	}
 	out := make([]LogEntry, 0, len(body.Logs))
 	for _, le := range body.Logs {
@@ -459,19 +451,20 @@ func (c *Client) GetBuildLogs(ctx context.Context, templateID, buildID string, o
 
 func toTemplate(t apiclient.Template) Template {
 	names := t.Names
-	if len(names) == 0 && len(t.Aliases) > 0 { //nolint:staticcheck // fallback to deprecated aliases on older servers.
-		names = slices.Clone(t.Aliases) //nolint:staticcheck // fallback to deprecated aliases on older servers.
+	if len(names) == 0 && len(t.Aliases) > 0 {
+		// Fallback to legacy aliases on older servers.
+		names = slices.Clone(t.Aliases)
 	}
 	out := Template{
 		TemplateID:    t.TemplateID,
 		BuildID:       t.BuildID,
 		Names:         names,
-		Aliases:       slices.Clone(t.Aliases), //nolint:staticcheck // expose legacy aliases alongside names.
+		Aliases:       slices.Clone(t.Aliases), // expose legacy aliases alongside names.
 		Public:        t.Public,
-		CPUCount:      int32(t.CpuCount),
-		MemoryMB:      int32(t.MemoryMB),
-		DiskSizeMB:    int32(t.DiskSizeMB),
-		EnvdVersion:   string(t.EnvdVersion),
+		CPUCount:      t.CpuCount,
+		MemoryMB:      t.MemoryMB,
+		DiskSizeMB:    t.DiskSizeMB,
+		EnvdVersion:   t.EnvdVersion,
 		BuildStatus:   BuildStatusValue(t.BuildStatus),
 		BuildCount:    t.BuildCount,
 		SpawnCount:    t.SpawnCount,
@@ -486,15 +479,15 @@ func toTemplate(t apiclient.Template) Template {
 		out.IsDefault = *t.IsDefault
 	}
 	if t.MaxCpuCount != nil {
-		mcc := int32(*t.MaxCpuCount)
+		mcc := *t.MaxCpuCount
 		out.MaxCPUCount = &mcc
 	}
 	if t.CreatedBy != nil {
 		out.CreatedBy = &TemplateUser{
 			ID: t.CreatedBy.Id.String(),
 		}
-		if t.CreatedBy.Email != nil { //nolint:staticcheck // expose creator email when provided by server.
-			out.CreatedBy.Email = *t.CreatedBy.Email //nolint:staticcheck // expose creator email when provided by server.
+		if t.CreatedBy.Email != nil {
+			out.CreatedBy.Email = *t.CreatedBy.Email
 		}
 	}
 	return out
@@ -504,22 +497,22 @@ func toTemplateBuild(b apiclient.TemplateBuild) TemplateBuild {
 	tb := TemplateBuild{
 		BuildID:    b.BuildID.String(),
 		Status:     BuildStatusValue(b.Status),
-		CPUCount:   int32(b.CpuCount),
-		MemoryMB:   int32(b.MemoryMB),
+		CPUCount:   b.CpuCount,
+		MemoryMB:   b.MemoryMB,
 		CreatedAt:  b.CreatedAt,
 		UpdatedAt:  b.UpdatedAt,
 		FinishedAt: b.FinishedAt,
 	}
 	if b.MaxCpuCount != nil {
-		mcc := int32(*b.MaxCpuCount)
+		mcc := *b.MaxCpuCount
 		tb.MaxCPUCount = &mcc
 	}
 	if b.DiskSizeMB != nil {
-		v := int32(*b.DiskSizeMB)
+		v := *b.DiskSizeMB
 		tb.DiskSizeMB = &v
 	}
 	if b.EnvdVersion != nil {
-		tb.EnvdVersion = string(*b.EnvdVersion)
+		tb.EnvdVersion = *b.EnvdVersion
 	}
 	return tb
 }

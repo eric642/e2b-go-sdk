@@ -1,10 +1,10 @@
 package template
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	e2b "github.com/eric642/e2b-go-sdk"
@@ -12,9 +12,11 @@ import (
 )
 
 const (
-	defaultPollInterval = 200 * time.Millisecond
-	buildEventBuffer    = 16
-	logTailLimit        = 20
+	defaultPollInterval   = 200 * time.Millisecond
+	buildEventBuffer      = 16
+	logTailLimit          = 20
+	buildStatusLogPage    = 100
+	maxTerminalDrainPages = 100
 )
 
 // BuildOptions captures every caller-tunable parameter of a template build.
@@ -369,14 +371,14 @@ func (c *Client) finishStartBuild(ctx context.Context, b *Builder, opts BuildOpt
 			}
 			return nil, err
 		}
-		needsUpload := !link.Present || (s.HasForceUpload && s.ForceUpload)
-		if needsUpload && link.Url == nil {
+		if !link.Present && link.Url == nil {
 			return nil, &UploadError{
 				Src:  src,
 				Hash: s.FilesHash,
-				Err:  fmt.Errorf("server reported present=false but returned no upload URL"),
+				Err:  errors.New("server reported present=false but returned no upload URL"),
 			}
 		}
+		needsUpload := (!link.Present || (s.HasForceUpload && s.ForceUpload)) && link.Url != nil
 		if !needsUpload {
 			continue
 		}
@@ -384,7 +386,7 @@ func (c *Client) finishStartBuild(ctx context.Context, b *Builder, opts BuildOpt
 		if s.ResolveSymlinks != nil {
 			resolve = *s.ResolveSymlinks
 		}
-		archiveBytes, err := tarFileBytes(src, b.contextDir, ignores, resolve)
+		archiveFile, _, cleanup, err := tarFileToTemp(src, b.contextDir, ignores, resolve)
 		if err != nil {
 			return nil, &UploadError{Src: src, Hash: s.FilesHash, Err: err}
 		}
@@ -392,13 +394,15 @@ func (c *Client) finishStartBuild(ctx context.Context, b *Builder, opts BuildOpt
 		if link.Headers != nil {
 			linkHeaders = *link.Headers
 		}
-		if err := c.uploadFile(ctx, *link.Url, bytes.NewReader(archiveBytes), linkHeaders); err != nil {
-			if ue, ok := errors.AsType[*UploadError](err); ok {
+		uploadErr := c.uploadFile(ctx, *link.Url, archiveFile, linkHeaders)
+		cleanup()
+		if uploadErr != nil {
+			if ue, ok := errors.AsType[*UploadError](uploadErr); ok {
 				ue.Src = src
 				ue.Hash = s.FilesHash
 				return nil, ue
 			}
-			return nil, &UploadError{Src: src, Hash: s.FilesHash, Err: err}
+			return nil, &UploadError{Src: src, Hash: s.FilesHash, Err: uploadErr}
 		}
 	}
 
@@ -453,6 +457,46 @@ func (c *Client) pollUntilDone(ctx context.Context, info *BuildInfo, interval ti
 			return false
 		}
 	}
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+
+	drainFinalLogs := func(lastPage []LogEntry) bool {
+		prev := lastPage
+		for range maxTerminalDrainPages {
+			if len(prev) < buildStatusLogPage {
+				return true
+			}
+			if ctx.Err() != nil {
+				sendCancel()
+				return false
+			}
+			next, err := c.getBuildStatus(ctx, info.TemplateID, info.BuildID, logsOffset)
+			if err != nil {
+				if ctx.Err() != nil {
+					sendCancel()
+					return false
+				}
+				return true
+			}
+			if len(next.Logs) == 0 || slices.Equal(next.Logs, prev) {
+				return true
+			}
+			logsOffset += len(next.Logs)
+			for _, le := range next.Logs {
+				if !emitLog(le) {
+					sendCancel()
+					return false
+				}
+			}
+			prev = next.Logs
+		}
+		return true
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -474,9 +518,15 @@ func (c *Client) pollUntilDone(ctx context.Context, info *BuildInfo, interval ti
 		}
 		switch status.Status {
 		case BuildStatusReady:
+			if !drainFinalLogs(status.Logs) {
+				return
+			}
 			sendTerminal(BuildEvent{Done: info})
 			return
 		case BuildStatusError:
+			if !drainFinalLogs(status.Logs) {
+				return
+			}
 			msg, step := "", ""
 			if status.Reason != nil {
 				msg = status.Reason.Message
@@ -492,11 +542,16 @@ func (c *Client) pollUntilDone(ctx context.Context, info *BuildInfo, interval ti
 			}})
 			return
 		}
+		if timer == nil {
+			timer = time.NewTimer(interval)
+		} else {
+			timer.Reset(interval)
+		}
 		select {
 		case <-ctx.Done():
 			sendCancel()
 			return
-		case <-time.After(interval):
+		case <-timer.C:
 		}
 	}
 }

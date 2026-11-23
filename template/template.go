@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -80,6 +81,40 @@ type RegistryCredentials struct {
 	Password string
 }
 
+// setErr records the first builder error without overwriting an earlier one.
+func (b *Builder) setErr(err error) {
+	if err != nil && b.err == nil {
+		b.err = err
+	}
+}
+
+// clone returns an isolated deep copy of b so mutations after finalization
+// cannot alias a FinalBuilder snapshot.
+func (b *Builder) clone() *Builder {
+	if b == nil {
+		return nil
+	}
+	cp := *b
+	if len(b.instructions) > 0 {
+		cp.instructions = make([]instruction, len(b.instructions))
+		for i, ins := range b.instructions {
+			insCopy := ins
+			insCopy.Args = slices.Clone(ins.Args)
+			if ins.ResolveSymlinks != nil {
+				v := *ins.ResolveSymlinks
+				insCopy.ResolveSymlinks = &v
+			}
+			cp.instructions[i] = insCopy
+		}
+	}
+	cp.ignorePatterns = slices.Clone(b.ignorePatterns)
+	if b.registryConfig != nil {
+		rc := *b.registryConfig
+		cp.registryConfig = &rc
+	}
+	return &cp
+}
+
 // FromImage sets the base Docker image. An optional RegistryCredentials
 // argument supplies basic-auth credentials for a private registry; only the
 // first value is consulted. When both Username and Password are empty the
@@ -97,9 +132,7 @@ func (b *Builder) FromImage(image string, creds ...RegistryCredentials) *Builder
 			Username: creds[0].Username,
 			Password: creds[0].Password,
 		}); err != nil {
-			if b.err == nil {
-				b.err = err
-			}
+			b.setErr(&BuildError{Op: "registry", Err: err})
 			return b
 		}
 		b.registryConfig = reg
@@ -111,6 +144,7 @@ func (b *Builder) FromImage(image string, creds ...RegistryCredentials) *Builder
 func (b *Builder) FromAWSRegistry(image, accessKeyID, secretAccessKey, region string) *Builder {
 	b.baseImage = image
 	b.baseTemplate = ""
+	b.registryConfig = nil
 	if b.forceNextLayer {
 		b.force = true
 	}
@@ -120,9 +154,7 @@ func (b *Builder) FromAWSRegistry(image, accessKeyID, secretAccessKey, region st
 		AwsSecretAccessKey: secretAccessKey,
 		AwsRegion:          region,
 	}); err != nil {
-		if b.err == nil {
-			b.err = err
-		}
+		b.setErr(&BuildError{Op: "registry", Err: err})
 		return b
 	}
 	b.registryConfig = reg
@@ -134,6 +166,7 @@ func (b *Builder) FromAWSRegistry(image, accessKeyID, secretAccessKey, region st
 func (b *Builder) FromGCPRegistry(image, serviceAccountJSON string) *Builder {
 	b.baseImage = image
 	b.baseTemplate = ""
+	b.registryConfig = nil
 	if b.forceNextLayer {
 		b.force = true
 	}
@@ -141,9 +174,7 @@ func (b *Builder) FromGCPRegistry(image, serviceAccountJSON string) *Builder {
 	if err := reg.FromGCPRegistry(apiclient.GCPRegistry{
 		ServiceAccountJson: serviceAccountJSON,
 	}); err != nil {
-		if b.err == nil {
-			b.err = err
-		}
+		b.setErr(&BuildError{Op: "registry", Err: err})
 		return b
 	}
 	b.registryConfig = reg
@@ -245,8 +276,9 @@ func (b *Builder) FromTemplate(templateID string) *Builder {
 	return b
 }
 
-// FromDockerfile parses inline Dockerfile content. Deprecated: prefer
-// FromDockerfileContent (clearer name) or FromDockerfileFile.
+// FromDockerfile parses inline Dockerfile content.
+//
+// Deprecated: prefer FromDockerfileContent (clearer name) or FromDockerfileFile.
 func (b *Builder) FromDockerfile(contents string) *Builder {
 	return b.FromDockerfileContent(contents)
 }
@@ -327,10 +359,13 @@ func WithCopyResolveSymlinks(b bool) CopyOption {
 }
 
 func validateRelativePath(src string) error {
+	if src == "" {
+		return &e2b.InvalidArgumentError{Message: "copy src must not be empty"}
+	}
 	if filepath.IsAbs(src) {
 		return &e2b.InvalidArgumentError{Message: fmt.Sprintf("copy src %q must be a relative path", src)}
 	}
-	normalized := filepath.ToSlash(filepath.Clean(src))
+	normalized := path.Clean(filepath.ToSlash(src))
 	if normalized == ".." || strings.HasPrefix(normalized, "../") {
 		return &e2b.InvalidArgumentError{Message: fmt.Sprintf("copy src %q escapes the context directory", src)}
 	}
@@ -428,20 +463,24 @@ func (b *Builder) SkipCache() *Builder {
 }
 
 // SetStartCmd records the command run when a sandbox boots, plus the readiness
-// check to wait on. Pass ReadyCmd{} to opt out of a readiness check.
+// check to wait on, and returns an isolated FinalBuilder snapshot. Pass
+// ReadyCmd{} to opt out of a readiness check.
 func (b *Builder) SetStartCmd(cmd string, ready ReadyCmd) *FinalBuilder {
 	b.startCmd = cmd
 	b.readyCmd = ready.Cmd()
-	return &FinalBuilder{b: b}
+	return &FinalBuilder{b: b.clone()}
 }
 
-// SetReadyCmd sets only the readiness check and finalizes the builder.
+// SetReadyCmd sets only the readiness check and returns an isolated
+// FinalBuilder snapshot.
 func (b *Builder) SetReadyCmd(ready ReadyCmd) *FinalBuilder {
 	b.readyCmd = ready.Cmd()
-	return &FinalBuilder{b: b}
+	return &FinalBuilder{b: b.clone()}
 }
 
-// SetTag tags the final template (e.g. "my-template:v2").
+// SetTag records local metadata on this Builder. It is not sent over the wire;
+// to name or tag a server-side build, set BuildOptions.Name ("name:tag") or
+// BuildOptions.Tags when calling Client.Build*.
 func (b *Builder) SetTag(tag string) *Builder {
 	b.tag = tag
 	return b
@@ -459,7 +498,8 @@ func (b *Builder) BaseImage() string { return b.baseImage }
 // BaseTemplate returns the base template ID (empty when building on an image).
 func (b *Builder) BaseTemplate() string { return b.baseTemplate }
 
-// Tag returns the tag associated with this template build.
+// Tag returns the local metadata tag stored on this Builder (not sent over the
+// wire; use BuildOptions.Name or BuildOptions.Tags for server-side builds).
 func (b *Builder) Tag() string { return b.tag }
 
 // ToJSON returns the JSON payload that Client.Build would send to the server,
@@ -471,7 +511,7 @@ func (b *Builder) ToJSON() (string, error) {
 	}
 	out, err := json.MarshalIndent(body, "", "  ")
 	if err != nil {
-		return "", err
+		return "", &BuildError{Op: "serialize", Err: err}
 	}
 	return string(out), nil
 }
@@ -926,20 +966,19 @@ func (b *Builder) BetaDevContainerPrebuild(dir string) *Builder {
 }
 
 // BetaSetDevContainerStart wires the devcontainer-specific start+ready
-// commands to a workspace directory. Requires FromTemplate("devcontainer").
+// commands to a workspace directory and returns an isolated FinalBuilder
+// snapshot. Requires FromTemplate("devcontainer").
 func (b *Builder) BetaSetDevContainerStart(dir string) *FinalBuilder {
 	if b.baseTemplate != "devcontainer" {
-		if b.err == nil {
-			b.err = &e2b.InvalidArgumentError{Message: "devcontainer start requires devcontainer base template"}
-		}
-		return &FinalBuilder{b: b}
+		b.setErr(&e2b.InvalidArgumentError{Message: "devcontainer start requires devcontainer base template"})
+		return &FinalBuilder{b: b.clone()}
 	}
 	quoted := shellQuote(dir)
 	b.startCmd = "sudo devcontainer up --workspace-folder " + quoted +
 		" && sudo /prepare-exec.sh " + quoted +
 		" | sudo tee /devcontainer.sh > /dev/null && sudo chmod +x /devcontainer.sh && sudo touch /devcontainer.up"
 	b.readyCmd = WaitForFile("/devcontainer.up").Cmd()
-	return &FinalBuilder{b: b}
+	return &FinalBuilder{b: b.clone()}
 }
 
 func (b *Builder) combinedIgnores() []string {
@@ -1060,11 +1099,13 @@ type FinalBuilder struct {
 	b *Builder
 }
 
-// Builder returns the underlying *Builder.
-func (f *FinalBuilder) Builder() *Builder { return f.b }
+// Builder returns an isolated clone of the underlying *Builder so caller
+// mutations cannot alter this FinalBuilder snapshot.
+func (f *FinalBuilder) Builder() *Builder { return f.b.clone() }
 
-// SetTag tags the finalized template (e.g. "my-template:v2") without dropping
-// back to *Builder.
+// SetTag records local metadata on this FinalBuilder without dropping back to
+// *Builder. It is not sent over the wire; set BuildOptions.Name ("name:tag") or
+// BuildOptions.Tags when calling Build*.
 func (f *FinalBuilder) SetTag(tag string) *FinalBuilder {
 	f.b.SetTag(tag)
 	return f
@@ -1082,7 +1123,8 @@ func (f *FinalBuilder) BaseImage() string { return f.b.BaseImage() }
 // BaseTemplate returns the base template ID (empty when building on an image).
 func (f *FinalBuilder) BaseTemplate() string { return f.b.BaseTemplate() }
 
-// Tag returns the tag associated with this template build.
+// Tag returns the local metadata tag stored on this FinalBuilder (not sent over
+// the wire; use BuildOptions.Name or BuildOptions.Tags for server-side builds).
 func (f *FinalBuilder) Tag() string { return f.b.Tag() }
 
 // ToDockerfile delegates to the underlying Builder.

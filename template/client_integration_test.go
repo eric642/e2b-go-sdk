@@ -77,7 +77,11 @@ func TestIntegrationBuildSimpleDebian(t *testing.T) {
 	}
 	registerCleanupDelete(t, cli, info.TemplateID)
 
-	sbx, err := e2b.Create(ctx, e2b.CreateOptions{Template: info.TemplateID, Timeout: 60 * time.Second})
+	sbxCli, err := e2b.NewClient(e2b.Config{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	sbx, err := sbxCli.Create(ctx, e2b.CreateOptions{Template: info.TemplateID, Timeout: 60 * time.Second})
 	if err != nil {
 		t.Fatalf("Create sandbox: %v", err)
 	}
