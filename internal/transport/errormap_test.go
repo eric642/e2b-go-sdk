@@ -77,8 +77,26 @@ func TestHTTPErrorErrorFormat(t *testing.T) {
 	if got := e.Error(); got != "http 401: token expired" {
 		t.Fatalf("got %q", got)
 	}
+	eCodeOnly := &HTTPError{Status: 503, Code: "sandbox_capacity_unavailable"}
+	if got := eCodeOnly.Error(); got != "http 503: sandbox_capacity_unavailable" {
+		t.Fatalf("got %q", got)
+	}
 	e2 := &HTTPError{Status: 500}
 	if got := e2.Error(); got != "http 500" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestReadHTTPErrorCodeOnlyJSON(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: 503,
+		Body:       io.NopCloser(strings.NewReader(`{"error_code":"sandbox_capacity_unavailable"}`)),
+	}
+	e := ReadHTTPError(resp)
+	if e.Code != "sandbox_capacity_unavailable" || e.Message != "" {
+		t.Fatalf("got %+v", e)
+	}
+	if got := e.Error(); got != "http 503: sandbox_capacity_unavailable" {
+		t.Fatalf("Error()=%q", got)
 	}
 }

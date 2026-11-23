@@ -28,6 +28,9 @@ func (e *HTTPError) Error() string {
 	if e.Message != "" {
 		return fmt.Sprintf("http %d: %s", e.Status, e.Message)
 	}
+	if e.Code != "" {
+		return fmt.Sprintf("http %d: %s", e.Status, e.Code)
+	}
 	return fmt.Sprintf("http %d", e.Status)
 }
 

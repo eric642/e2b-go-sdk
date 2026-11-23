@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"connectrpc.com/connect"
 
@@ -194,7 +195,9 @@ func NewVolumeAPIClient(baseURL string, hc *http.Client, token string, extraHead
 	if extraHeaders != nil {
 		hdrs = make(map[string]string, len(extraHeaders))
 		for k, v := range extraHeaders {
-			if http.CanonicalHeaderKey(k) == HeaderAuthorization {
+			if strings.EqualFold(k, HeaderAuthorization) ||
+				strings.EqualFold(k, HeaderAPIKey) ||
+				strings.EqualFold(k, HeaderAccessToken) {
 				continue
 			}
 			hdrs[k] = v

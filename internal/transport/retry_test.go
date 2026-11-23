@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,11 +17,18 @@ import (
 	"time"
 )
 
+type fakeStep struct {
+	status int
+	hdr    map[string]string
+	err    error
+	fn     func(*http.Request) (*http.Response, error)
+}
+
 type fakeRT struct {
 	mu     sync.Mutex
 	calls  int
 	bodies []string
-	steps  []func(*http.Request) (*http.Response, error)
+	steps  []fakeStep
 	closed []*trackBody
 }
 
@@ -46,21 +54,30 @@ func (f *fakeRT) RoundTrip(req *http.Request) (*http.Response, error) {
 	if i >= len(f.steps) {
 		i = len(f.steps) - 1
 	}
-	return f.steps[i](req)
+	step := f.steps[i]
+	if step.fn != nil {
+		return step.fn(req)
+	}
+	if step.status == 0 && step.err != nil {
+		return nil, step.err
+	}
+	return f.makeResp(req, step.status, step.hdr), step.err
 }
 
-func (f *fakeRT) respond(status int, hdr map[string]string) func(*http.Request) (*http.Response, error) {
-	return func(req *http.Request) (*http.Response, error) {
-		h := http.Header{}
-		for k, v := range hdr {
-			h.Set(k, v)
-		}
-		body := &trackBody{Reader: strings.NewReader("body")}
-		f.mu.Lock()
-		f.closed = append(f.closed, body)
-		f.mu.Unlock()
-		return &http.Response{StatusCode: status, Header: h, Body: body, Request: req}, nil
+func (f *fakeRT) makeResp(req *http.Request, status int, hdr map[string]string) *http.Response {
+	h := http.Header{}
+	for k, v := range hdr {
+		h.Set(k, v)
 	}
+	body := &trackBody{Reader: strings.NewReader("body")}
+	f.mu.Lock()
+	f.closed = append(f.closed, body)
+	f.mu.Unlock()
+	return &http.Response{StatusCode: status, Header: h, Body: body, Request: req}
+}
+
+func (f *fakeRT) respond(status int, hdr map[string]string) fakeStep {
+	return fakeStep{status: status, hdr: hdr}
 }
 
 type sleepRecorder struct {
@@ -101,7 +118,7 @@ func doReq(t *testing.T, rt http.RoundTripper, method, body string) (*http.Respo
 func TestRetryOnRetryableStatuses(t *testing.T) {
 	for _, status := range []int{429, 502, 503, 504} {
 		f := &fakeRT{}
-		f.steps = []func(*http.Request) (*http.Response, error){f.respond(status, nil), f.respond(200, nil)}
+		f.steps = []fakeStep{f.respond(status, nil), f.respond(200, nil)}
 		rt, rec := newTestRetry(f, 3)
 		resp, err := doReq(t, rt, http.MethodPost, `{"a":1}`)
 		if err != nil {
@@ -126,7 +143,7 @@ func TestRetryOnRetryableStatuses(t *testing.T) {
 func TestRetryNotOnOtherStatuses(t *testing.T) {
 	for _, status := range []int{400, 401, 404, 409, 500} {
 		f := &fakeRT{}
-		f.steps = []func(*http.Request) (*http.Response, error){f.respond(status, nil)}
+		f.steps = []fakeStep{f.respond(status, nil)}
 		rt, _ := newTestRetry(f, 3)
 		resp, err := doReq(t, rt, http.MethodGet, "")
 		if err != nil {
@@ -141,7 +158,7 @@ func TestRetryNotOnOtherStatuses(t *testing.T) {
 
 func TestRetryShouldRetryHeaderAuthoritative(t *testing.T) {
 	f := &fakeRT{}
-	f.steps = []func(*http.Request) (*http.Response, error){
+	f.steps = []fakeStep{
 		f.respond(500, map[string]string{"Should-Retry": "true"}), f.respond(201, nil),
 	}
 	rt, _ := newTestRetry(f, 3)
@@ -155,7 +172,7 @@ func TestRetryShouldRetryHeaderAuthoritative(t *testing.T) {
 	}
 
 	f2 := &fakeRT{}
-	f2.steps = []func(*http.Request) (*http.Response, error){f2.respond(503, map[string]string{"Should-Retry": "False"})}
+	f2.steps = []fakeStep{f2.respond(503, map[string]string{"Should-Retry": "False"})}
 	rt2, _ := newTestRetry(f2, 3)
 	resp, err = doReq(t, rt2, http.MethodPost, "x")
 	if err != nil {
@@ -169,13 +186,13 @@ func TestRetryShouldRetryHeaderAuthoritative(t *testing.T) {
 
 func TestRetryExhaustsAndReturnsLastResponse(t *testing.T) {
 	f := &fakeRT{}
-	f.steps = []func(*http.Request) (*http.Response, error){f.respond(503, nil)}
+	f.steps = []fakeStep{f.respond(503, nil)}
 	rt, rec := newTestRetry(f, 3)
 	resp, err := doReq(t, rt, http.MethodGet, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 503 || f.calls != 4 {
 		t.Fatalf("status=%d calls=%d, want 503 after 4 attempts", resp.StatusCode, f.calls)
 	}
@@ -195,7 +212,7 @@ func TestRetryExhaustsAndReturnsLastResponse(t *testing.T) {
 
 func TestRetryHonorsRetryAfter(t *testing.T) {
 	f := &fakeRT{}
-	f.steps = []func(*http.Request) (*http.Response, error){
+	f.steps = []fakeStep{
 		f.respond(429, map[string]string{"Retry-After": "2"}), f.respond(200, nil),
 	}
 	rt, rec := newTestRetry(f, 3)
@@ -211,6 +228,7 @@ func TestRetryHonorsRetryAfter(t *testing.T) {
 
 func TestParseRetryAfter(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	maxSecs := int64(maxRetryAfter / time.Second)
 	cases := []struct {
 		in   string
 		want time.Duration
@@ -222,6 +240,12 @@ func TestParseRetryAfter(t *testing.T) {
 		{"-1", 0, false},
 		{"1.5", 0, false},
 		{"abc", 0, false},
+		{strconv.FormatInt(maxSecs, 10), maxRetryAfter, true},
+		{strconv.FormatInt(maxSecs+1, 10), 0, false},
+		// Values that fit in int64 seconds but would overflow int64 nanoseconds
+		// if multiplied by time.Second before range-checking.
+		{"10000000000", 0, false},
+		{"9223372036854775807", 0, false},
 		{"99999999999999999999", 0, false},
 		{now.Add(30 * time.Second).Format(http.TimeFormat), 30 * time.Second, true},
 		{now.Add(-time.Hour).Format(http.TimeFormat), 0, true},
@@ -250,7 +274,7 @@ func TestRetryBackoffCapAndJitter(t *testing.T) {
 
 func TestRetrySkipsWhenWaitExceedsDeadline(t *testing.T) {
 	f := &fakeRT{}
-	f.steps = []func(*http.Request) (*http.Response, error){
+	f.steps = []fakeStep{
 		f.respond(503, map[string]string{"Retry-After": "120"}), f.respond(200, nil),
 	}
 	rt, rec := newTestRetry(f, 3)
@@ -261,7 +285,7 @@ func TestRetrySkipsWhenWaitExceedsDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 503 || f.calls != 1 || len(rec.delays) != 0 {
 		t.Fatalf("status=%d calls=%d delays=%v; retry should be skipped", resp.StatusCode, f.calls, rec.delays)
 	}
@@ -272,7 +296,7 @@ func TestRetrySkipsWhenWaitExceedsDeadline(t *testing.T) {
 
 func TestRetryNoDeadlineUsesTotalCap(t *testing.T) {
 	f := &fakeRT{}
-	f.steps = []func(*http.Request) (*http.Response, error){
+	f.steps = []fakeStep{
 		f.respond(503, map[string]string{"Retry-After": "61"}), f.respond(200, nil),
 	}
 	rt, _ := newTestRetry(f, 3)
@@ -288,7 +312,7 @@ func TestRetryNoDeadlineUsesTotalCap(t *testing.T) {
 
 func TestRetryStopsOnContextCancelDuringWait(t *testing.T) {
 	f := &fakeRT{}
-	f.steps = []func(*http.Request) (*http.Response, error){f.respond(503, nil)}
+	f.steps = []fakeStep{f.respond(503, nil)}
 	ctx, cancel := context.WithCancel(context.Background())
 	rt := &RetryTransport{Base: f, MaxRetries: 3, random: func() float64 { return 0 },
 		sleep: func(ctx context.Context, _ time.Duration) error { cancel(); return ctx.Err() }}
@@ -320,6 +344,19 @@ func TestRetryRealWaitAbortsOnCancel(t *testing.T) {
 	if time.Since(start) > time.Second {
 		t.Fatal("wait did not abort promptly")
 	}
+	// Non-positive delay must still observe a canceled context first.
+	if err := rt.wait(ctx, 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait(canceled, 0)=%v, want context.Canceled", err)
+	}
+	if err := rt.wait(ctx, -time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait(canceled, -1s)=%v, want context.Canceled", err)
+	}
+	if err := rt.wait(context.Background(), 0); err != nil {
+		t.Fatalf("wait(bg, 0)=%v", err)
+	}
+	if err := rt.wait(context.Background(), -time.Millisecond); err != nil {
+		t.Fatalf("wait(bg, -1ms)=%v", err)
+	}
 	if err := rt.wait(context.Background(), time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
@@ -328,10 +365,10 @@ func TestRetryRealWaitAbortsOnCancel(t *testing.T) {
 func TestRetryDoesNotRetryAfterContextDone(t *testing.T) {
 	f := &fakeRT{}
 	ctx, cancel := context.WithCancel(context.Background())
-	f.steps = []func(*http.Request) (*http.Response, error){func(req *http.Request) (*http.Response, error) {
+	f.steps = []fakeStep{{fn: func(req *http.Request) (*http.Response, error) {
 		cancel()
-		return f.respond(503, nil)(req)
-	}}
+		return f.makeResp(req, 503, nil), nil
+	}}}
 	rt, _ := newTestRetry(f, 3)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://x/", nil)
 	resp, err := rt.RoundTrip(req)
@@ -346,7 +383,7 @@ func TestRetryDoesNotRetryAfterContextDone(t *testing.T) {
 
 func TestRetryNonReplayableBodySingleAttempt(t *testing.T) {
 	f := &fakeRT{}
-	f.steps = []func(*http.Request) (*http.Response, error){f.respond(503, nil), f.respond(200, nil)}
+	f.steps = []fakeStep{f.respond(503, nil), f.respond(200, nil)}
 	rt, _ := newTestRetry(f, 3)
 	pr, pw := io.Pipe()
 	go func() { _, _ = pw.Write([]byte("stream")); _ = pw.Close() }()
@@ -367,8 +404,8 @@ func TestRetryNonReplayableBodySingleAttempt(t *testing.T) {
 func TestRetryConnectionErrors(t *testing.T) {
 	dialErr := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
 	f := &fakeRT{}
-	f.steps = []func(*http.Request) (*http.Response, error){
-		func(*http.Request) (*http.Response, error) { return nil, dialErr },
+	f.steps = []fakeStep{
+		{err: dialErr},
 		f.respond(200, nil),
 	}
 	rt, rec := newTestRetry(f, 3)
@@ -383,11 +420,13 @@ func TestRetryConnectionErrors(t *testing.T) {
 
 	resetErr := &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
 	f2 := &fakeRT{}
-	f2.steps = []func(*http.Request) (*http.Response, error){
-		func(*http.Request) (*http.Response, error) { return nil, resetErr },
-	}
+	f2.steps = []fakeStep{{err: resetErr}}
 	rt2, _ := newTestRetry(f2, 3)
-	if _, err := doReq(t, rt2, http.MethodPost, "b"); !errors.Is(err, syscall.ECONNRESET) {
+	resp2, err := doReq(t, rt2, http.MethodPost, "b")
+	if resp2 != nil {
+		_ = resp2.Body.Close()
+	}
+	if !errors.Is(err, syscall.ECONNRESET) {
 		t.Fatalf("err=%v", err)
 	}
 	if f2.calls != 1 {
@@ -395,15 +434,52 @@ func TestRetryConnectionErrors(t *testing.T) {
 	}
 
 	f3 := &fakeRT{}
-	f3.steps = []func(*http.Request) (*http.Response, error){
-		func(*http.Request) (*http.Response, error) { return nil, &net.DNSError{Err: "no such host", Name: "x"} },
-	}
+	f3.steps = []fakeStep{{err: &net.DNSError{Err: "no such host", Name: "x"}}}
 	rt3, _ := newTestRetry(f3, 2)
-	if _, err := doReq(t, rt3, http.MethodGet, ""); err == nil {
+	resp3, err := doReq(t, rt3, http.MethodGet, "")
+	if resp3 != nil {
+		_ = resp3.Body.Close()
+	}
+	if err == nil {
 		t.Fatal("expected error")
 	}
 	if f3.calls != 3 {
 		t.Fatalf("calls=%d want 3", f3.calls)
+	}
+}
+
+func TestRetryClosesBodyWhenRoundTripReturnsRespAndErr(t *testing.T) {
+	// Non-retryable error returned alongside a non-nil response.
+	f := &fakeRT{}
+	f.steps = []fakeStep{{status: 500, err: errors.New("broken transport")}}
+	rt, _ := newTestRetry(f, 3)
+	resp, err := doReq(t, rt, http.MethodGet, "")
+	if resp != nil {
+		_ = resp.Body.Close()
+		t.Fatal("expected nil resp when err != nil")
+	}
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if len(f.closed) != 1 || !f.closed[0].closed.Load() {
+		t.Fatal("non-nil response body returned with error was not closed")
+	}
+
+	// Retryable error that exhausts retries while returning non-nil responses.
+	dialErr := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+	f2 := &fakeRT{}
+	f2.steps = []fakeStep{{status: 503, err: dialErr}}
+	rt2, _ := newTestRetry(f2, 1)
+	resp2, err := doReq(t, rt2, http.MethodGet, "")
+	if resp2 != nil {
+		_ = resp2.Body.Close()
+		t.Fatal("expected nil resp when err != nil")
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("err=%v", err)
+	}
+	if len(f2.closed) != 2 || !f2.closed[0].closed.Load() || !f2.closed[1].closed.Load() {
+		t.Fatalf("expected all returned bodies closed, got %d", len(f2.closed))
 	}
 }
 
@@ -416,7 +492,7 @@ func TestIsConnectionError(t *testing.T) {
 	}
 }
 
-func TestNewRetryTransportDisabled(t *testing.T) {
+func TestNewRetryTransportDisabledAndUnwrapsStacked(t *testing.T) {
 	base := &fakeRT{}
 	if got := NewRetryTransport(base, 0); got != base {
 		t.Fatal("0 retries should return base unchanged")
@@ -424,8 +500,34 @@ func TestNewRetryTransportDisabled(t *testing.T) {
 	if got := NewRetryTransport(nil, -1); got != http.DefaultTransport {
 		t.Fatal("nil base should default to http.DefaultTransport")
 	}
-	if _, ok := NewRetryTransport(base, 2).(*RetryTransport); !ok {
-		t.Fatal("expected *RetryTransport")
+	wrapped, ok := NewRetryTransport(base, 2).(*RetryTransport)
+	if !ok || wrapped.Base != base || wrapped.MaxRetries != 2 {
+		t.Fatalf("unexpected wrapped transport: %#v", wrapped)
+	}
+
+	// Passing an already-wrapped *RetryTransport must unwrap instead of stacking.
+	rewrapped, ok := NewRetryTransport(wrapped, 3).(*RetryTransport)
+	if !ok || rewrapped.Base != base || rewrapped.MaxRetries != 3 {
+		t.Fatalf("stacked *RetryTransport not unwrapped: %#v", rewrapped)
+	}
+
+	// Multi-level manually stacked *RetryTransport unwraps completely.
+	nested := &RetryTransport{Base: &RetryTransport{Base: base, MaxRetries: 2}, MaxRetries: 2}
+	flat, ok := NewRetryTransport(nested, 1).(*RetryTransport)
+	if !ok || flat.Base != base || flat.MaxRetries != 1 {
+		t.Fatalf("nested *RetryTransport not unwrapped: %#v", flat)
+	}
+	if got := NewRetryTransport(nested, 0); got != base {
+		t.Fatalf("0 retries on nested *RetryTransport should return base, got %T", got)
+	}
+
+	// Typed-nil and nil-base *RetryTransport fall back to http.DefaultTransport.
+	var typedNil *RetryTransport
+	if got := NewRetryTransport(typedNil, 0); got != http.DefaultTransport {
+		t.Fatalf("typed nil base should fall back to http.DefaultTransport, got %T", got)
+	}
+	if got, ok := NewRetryTransport(&RetryTransport{Base: nil, MaxRetries: 2}, 1).(*RetryTransport); !ok || got.Base != http.DefaultTransport {
+		t.Fatalf("nil-base *RetryTransport should unwrap to http.DefaultTransport, got %#v", got)
 	}
 }
 

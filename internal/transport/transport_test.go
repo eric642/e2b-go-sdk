@@ -396,7 +396,17 @@ func TestNewVolumeAPIClientAuthorizationIsolation(t *testing.T) {
 	server := httptest.NewServer(c.handler(http.StatusNotFound))
 	defer server.Close()
 
-	extra := map[string]string{"Authorization": "Bearer control-plane", "X-Extra": "x"}
+	extra := map[string]string{
+		"Authorization":  "Bearer control-plane",
+		"authorization":  "Bearer lower-case",
+		"X-API-Key":      "e2b_secret_key",
+		"x-api-key":      "e2b_secret_key_lower",
+		"X-Api-Key":      "e2b_secret_key_canon",
+		"X-Access-Token": "envd-tok",
+		"x-access-token": "envd-tok-lower",
+		"User-Agent":     "ua/1",
+		"X-Extra":        "x",
+	}
 
 	withToken, err := NewVolumeAPIClient(server.URL, server.Client(), "vol-jwt", extra)
 	if err != nil {
@@ -412,8 +422,14 @@ func TestNewVolumeAPIClientAuthorizationIsolation(t *testing.T) {
 	if got := h.Get("Authorization"); got != "Bearer vol-jwt" {
 		t.Fatalf("Authorization=%q, want volume bearer", got)
 	}
-	if h.Get("X-Extra") != "x" {
-		t.Fatalf("extra header missing: %v", h)
+	if got := h.Get("X-API-Key"); got != "" {
+		t.Fatalf("X-API-Key leaked to volume API: %q", got)
+	}
+	if got := h.Get("X-Access-Token"); got != "" {
+		t.Fatalf("X-Access-Token leaked to volume API: %q", got)
+	}
+	if h.Get("X-Extra") != "x" || h.Get("User-Agent") != "ua/1" {
+		t.Fatalf("non-auth extra headers missing: %v", h)
 	}
 
 	noToken, err := NewVolumeAPIClient(server.URL, server.Client(), "", extra)
@@ -425,7 +441,14 @@ func TestNewVolumeAPIClientAuthorizationIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
-	if got := c.last(t).Get("Authorization"); got != "" {
+	h2 := c.last(t)
+	if got := h2.Get("Authorization"); got != "" {
 		t.Fatalf("Authorization must be stripped without token, got %q", got)
+	}
+	if got := h2.Get("X-API-Key"); got != "" {
+		t.Fatalf("X-API-Key must be stripped without token, got %q", got)
+	}
+	if got := h2.Get("X-Access-Token"); got != "" {
+		t.Fatalf("X-Access-Token must be stripped without token, got %q", got)
 	}
 }

@@ -57,6 +57,17 @@ type RetryTransport struct {
 }
 
 func NewRetryTransport(base http.RoundTripper, maxRetries int) http.RoundTripper {
+	for {
+		rt, ok := base.(*RetryTransport)
+		if !ok {
+			break
+		}
+		if rt == nil {
+			base = nil
+			break
+		}
+		base = rt.Base
+	}
 	if base == nil {
 		base = http.DefaultTransport
 	}
@@ -91,6 +102,12 @@ func (t *RetryTransport) wait(ctx context.Context, d time.Duration) error {
 	if t.sleep != nil {
 		return t.sleep(ctx, d)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if d <= 0 {
+		return nil
+	}
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
@@ -121,12 +138,19 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		resp, err := t.base().RoundTrip(r)
 		if attempt >= t.MaxRetries || ctx.Err() != nil {
+			if err != nil && resp != nil {
+				drainAndClose(resp.Body)
+				return nil, err
+			}
 			return resp, err
 		}
 
 		var delay time.Duration
 		if err != nil {
 			if !isConnectionError(err) {
+				if resp != nil {
+					drainAndClose(resp.Body)
+				}
 				return nil, err
 			}
 			delay = t.backoff(attempt)
@@ -138,6 +162,10 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			delay = d
 		}
 		if !t.timeNow().Add(delay).Before(deadline) {
+			if err != nil && resp != nil {
+				drainAndClose(resp.Body)
+				return nil, err
+			}
 			return resp, err
 		}
 		if resp != nil {
@@ -186,7 +214,7 @@ func ParseRetryAfter(v string, now time.Time) (time.Duration, bool) {
 	}
 	if isDigits(v) {
 		secs, err := strconv.ParseInt(v, 10, 64)
-		if err != nil || time.Duration(secs)*time.Second > maxRetryAfter {
+		if err != nil || secs < 0 || secs > int64(maxRetryAfter/time.Second) {
 			return 0, false
 		}
 		return time.Duration(secs) * time.Second, true
